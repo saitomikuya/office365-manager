@@ -1,0 +1,17 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>分配订阅</h2>
+<form method="post" action="{{ url_for('assign_licence', user_id=user_id) }}" style="max-width: 400px;">
+    <div class="mb-3">
+        <label for="sku_id" class="form-label">选择订阅 SKU</label>
+        <select id="sku_id" name="sku_id" class="form-select" required>
+            <option value="" selected disabled>请选择...</option>
+            {% for sku in skus %}
+            <option value="{{ sku.skuId }}">{{ sku.skuPartNumber }} - {{ sku.prepaidUnits.enabled }} 可用</option>
+            {% endfor %}
+        </select>
+    </div>
+    <button type="submit" class="btn btn-primary">分配</button>
+    <a href="{{ url_for('user_detail', user_id=user_id) }}" class="btn btn-secondary">取消</a>
+</form>
+{% endblock %}

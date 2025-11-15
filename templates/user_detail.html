@@ -1,0 +1,56 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>用户详情</h2>
+<p><strong>显示名称：</strong> {{ user.displayName }}</p>
+<p><strong>登录名：</strong> {{ user.userPrincipalName }}</p>
+<p><strong>账户启用：</strong> {{ '是' if user.accountEnabled else '否' }}</p>
+{% if user.createdDateTime %}
+<p><strong>创建时间：</strong> {{ user.createdDateTime }}</p>
+{% endif %}
+{% if user.lastPasswordChangeDateTime %}
+<p><strong>上次密码修改：</strong> {{ user.lastPasswordChangeDateTime }}</p>
+{% endif %}
+<h4>角色</h4>
+<p>
+    {% for role in roles %}
+        <span class="badge bg-primary">{{ role }}</span>
+    {% else %}
+        <span class="text-muted">无角色分配</span>
+    {% endfor %}
+</p>
+
+<h4>订阅/许可证</h4>
+<p>
+    {% for lic in licence_details %}
+        <span class="badge bg-secondary">{{ lic.skuPartNumber }}</span>
+    {% else %}
+        <span class="text-muted">无订阅信息</span>
+    {% endfor %}
+</p>
+
+<h4>修改信息</h4>
+<form method="post" action="{{ url_for('update_user', user_id=user.id) }}" style="max-width: 400px;">
+    <div class="mb-3">
+        <label for="new_password" class="form-label">重置密码</label>
+        <input type="password" class="form-control" id="new_password" name="new_password" placeholder="留空则不修改">
+    </div>
+    <div class="mb-3">
+        <label for="account_enabled" class="form-label">账户启用状态</label>
+        <select id="account_enabled" name="account_enabled" class="form-select">
+            <option value="true" {% if user.accountEnabled %}selected{% endif %}>启用</option>
+            <option value="false" {% if not user.accountEnabled %}selected{% endif %}>禁用</option>
+        </select>
+    </div>
+    <div class="mb-3">
+        <label for="role" class="form-label">角色</label>
+        <select id="role" name="role" class="form-select">
+            <option value="normal" {% if current_role == 'normal' %}selected{% endif %}>普通用户</option>
+            <option value="Global Administrator" {% if current_role == 'Global Administrator' %}selected{% endif %}>全局管理员</option>
+            <option value="Privileged Role Administrator" {% if current_role == 'Privileged Role Administrator' %}selected{% endif %}>特权角色管理员</option>
+        </select>
+    </div>
+    <button type="submit" class="btn btn-primary">保存修改</button>
+    <a href="{{ url_for('assign_licence', user_id=user.id) }}" class="btn btn-success">分配订阅</a>
+    <a href="{{ url_for('list_users', view='users') }}" class="btn btn-secondary">返回列表</a>
+</form>
+{% endblock %}

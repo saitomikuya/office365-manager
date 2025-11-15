@@ -1,0 +1,190 @@
+{% extends 'base.html' %}
+{% block content %}
+
+{#
+  用户管理页面根据传入的 mode 不同呈现多种视图：
+  - select: 列出可选组织供用户选择。
+  - api_unavailable: 当前组织 API 不可用时的错误提示。
+  - summary: 显示当前组织的概况（用户数、管理员数、订阅情况）。
+  - list: 显示用户列表并可根据角色筛选。
+#}
+
+{% if mode == 'select' %}
+  <h2>选择组织</h2>
+  <p>请选择要管理的组织：</p>
+  {% if organizations %}
+    <div class="mb-2">
+      <a href="{{ url_for('test_all_orgs') }}" class="btn btn-sm btn-primary">刷新全部 API 状态</a>
+    </div>
+    <table class="table table-striped">
+      <thead>
+        <tr>
+          <th>组织名称</th>
+          <th>API 状态</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for org in organizations %}
+        <tr>
+          <td>{{ org.name }}</td>
+          <td>
+            {% set status = org_api_status.get(org.id) %}
+            {% if status is none %}
+              <span class="text-muted">未测试</span>
+            {% elif status %}
+              <span class="badge bg-success">可用</span>
+            {% else %}
+              <span class="badge bg-danger">不可用</span>
+            {% endif %}
+          </td>
+          <td>
+            <a href="{{ url_for('select_org', org_id=org.id, next=url_for('list_users', view='summary')) }}" class="btn btn-sm btn-primary">选择</a>
+            <a href="{{ url_for('test_org', org_id=org.id) }}" class="btn btn-sm btn-secondary">刷新 API</a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p>暂无组织，请先在“组织管理”页面添加。</p>
+  {% endif %}
+
+{% elif mode == 'api_unavailable' %}
+  <h2>组织概况</h2>
+  {# 突出当前组织，并提供切换按钮 #}
+  <div class="current-org-line">
+    <span class="current-org-title">当前组织：</span>
+    <span class="current-org-label">{{ get_org(active_org_id).name }}</span>
+    <a href="{{ url_for('list_users', reset=1) }}" class="btn btn-sm btn-secondary ml-2">切换组织</a>
+  </div>
+  <div class="alert alert-danger" role="alert">
+    当前组织的 API 不可用，请前往“组织管理”检查配置或点击下方按钮后重试。
+  </div>
+  <div class="mb-3">
+    <a href="{{ url_for('test_org', org_id=active_org_id) }}" class="btn btn-warning">重新检测 API</a>
+    <a href="{{ url_for('manage_orgs') }}" class="btn btn-secondary">组织管理</a>
+    {# 返回概况会重新触发 summary 视图 #}
+    <a href="{{ url_for('list_users') }}" class="btn btn-primary">返回概况</a>
+  </div>
+
+{% elif mode == 'summary' %}
+  <h2>组织概况</h2>
+  {# 突出当前组织，并提供切换按钮 #}
+  <div class="current-org-line">
+    <span class="current-org-title">当前组织：</span>
+    <span class="current-org-label">{{ get_org(active_org_id).name }}</span>
+    <a href="{{ url_for('list_users', reset=1) }}" class="btn btn-sm btn-secondary ml-2">切换组织</a>
+  </div>
+  <div class="row">
+    <div class="col-md-4">
+      <div class="card text-center">
+        <div class="card-body">
+          <h5 class="card-title">全局管理员数</h5>
+          <p class="stat-number">{{ summary.global_admin_count }}</p>
+        </div>
+      </div>
+    </div>
+    <div class="col-md-4">
+      <div class="card text-center">
+        <div class="card-body">
+          <h5 class="card-title">特权管理员数</h5>
+          <p class="stat-number">{{ summary.privileged_admin_count }}</p>
+        </div>
+      </div>
+    </div>
+    <div class="col-md-4">
+      <div class="card text-center">
+        <div class="card-body">
+          <h5 class="card-title">总用户数</h5>
+          <p class="stat-number">
+            {% if summary.total_users is not none %}
+              {{ summary.total_users }}
+            {% else %}
+              —
+            {% endif %}
+          </p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <h4>许可情况</h4>
+  <table class="table table-bordered">
+    <thead>
+      <tr>
+        <th>SKU 名称</th>
+        <th>已启用数量</th>
+        <th>已使用数量</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for lic in summary.licences %}
+        <tr>
+          <td>{{ lic.skuPartNumber }}</td>
+          <td>{{ lic.enabled }}</td>
+          <td>{{ lic.used }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="3">无订阅信息。</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <div class="mb-3">
+    <a href="{{ url_for('list_users', view='users') }}" class="btn btn-primary">查看用户列表</a>
+  </div>
+
+{% elif mode == 'list' %}
+  <h2>用户列表 - {{ get_org(active_org_id).name }}</h2>
+  <div class="mb-3">
+    <form class="row row-cols-lg-auto g-3 align-items-center" method="get" action="{{ url_for('list_users') }}">
+      <input type="hidden" name="view" value="users">
+      <div class="col-12">
+        <label for="role" class="form-label">筛选角色</label>
+        <select id="role" name="role" class="form-select">
+          <option value="" {% if role_filter == '' %}selected{% endif %}>全部</option>
+          <option value="Global Administrator" {% if role_filter == 'Global Administrator' %}selected{% endif %}>全局管理员 (Global Administrator)</option>
+          <option value="Privileged Role Administrator" {% if role_filter == 'Privileged Role Administrator' %}selected{% endif %}>特权角色管理员 (Privileged Role Administrator)</option>
+        </select>
+      </div>
+      <div class="col-12">
+        <button type="submit" class="btn btn-primary">应用筛选</button>
+      </div>
+      <div class="col-12">
+        <a href="{{ url_for('list_users') }}" class="btn btn-secondary">返回概况</a>
+      </div>
+    </form>
+  </div>
+  <table class="table table-hover">
+    <thead>
+      <tr>
+        <th>显示名称</th>
+        <th>登录名</th>
+        <th>管理员角色</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for user in users %}
+        <tr>
+          <td>{{ user.displayName }}</td>
+          <td>{{ user.userPrincipalName }}</td>
+          <td>
+            {% if user.is_global_admin %}<span class="badge bg-danger">全局管理员</span>{% endif %}
+            {% if user.is_privileged_admin %}<span class="badge bg-warning text-dark">特权角色管理员</span>{% endif %}
+            {% if not user.is_global_admin and not user.is_privileged_admin %}<span class="text-muted">普通用户</span>{% endif %}
+          </td>
+          <td>
+            <a href="{{ url_for('user_detail', user_id=user.id) }}" class="btn btn-sm btn-primary">查看</a>
+          </td>
+        </tr>
+      {% endfor %}
+      {% if users|length == 0 %}
+        <tr><td colspan="4">未找到用户。</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+
+{% endif %}
+
+{% endblock %}

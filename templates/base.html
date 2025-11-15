@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title if title else 'Office365 管理' }}</title>
+    <!-- 使用本地样式文件，避免外部 CDN 不可用 -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <nav class="navbar">
+        <div class="navbar-brand">
+            <a href="{{ url_for('dashboard') }}">Office365 管理</a>
+        </div>
+        <div class="navbar-links">
+            <a href="{{ url_for('dashboard') }}">仪表盘</a>
+            <a href="{{ url_for('manage_orgs') }}">组织管理</a>
+            <a href="{{ url_for('list_users', reset=1) }}">用户管理</a>
+            <a href="{{ url_for('change_password') }}">修改密码</a>
+        </div>
+        <div class="navbar-extra">
+            {# 显示当前组织及下拉切换 #}
+            {% if active_org_id and get_org(active_org_id) %}
+                {% if config.organizations|length > 1 %}
+                    <div class="org-switch-wrapper">
+                        <span class="current-org-label">当前组织: {{ get_org(active_org_id).name }}</span>
+                        <details class="org-switcher">
+                            <summary class="org-summary">▼</summary>
+                            <ul class="org-dropdown">
+                                {% for org in config.organizations %}
+                                    {% if org.id != active_org_id %}
+                                        <li><a href="{{ url_for('select_org', org_id=org.id) }}">{{ org.name }}</a></li>
+                                    {% endif %}
+                                {% endfor %}
+                            </ul>
+                        </details>
+                    </div>
+                {% else %}
+                    <span class="current-org-label">当前组织: {{ get_org(active_org_id).name }}</span>
+                {% endif %}
+            {% endif %}
+            <a href="{{ url_for('logout') }}" class="btn btn-secondary">退出</a>
+        </div>
+    </nav>
+
+    <div class="container">
+        {% with messages = get_flashed_messages() %}
+          {% if messages %}
+            <div class="alert alert-info mt-2">
+              {% for msg in messages %}{{ msg }}<br>{% endfor %}
+            </div>
+          {% endif %}
+        {% endwith %}
+        {% block content %}{% endblock %}
+    </div>
+
+    {# 移除外部脚本，避免依赖 Bootstrap JS #}
+</body>
+</html>

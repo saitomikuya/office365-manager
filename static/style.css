@@ -1,0 +1,439 @@
+/*
+ * 自定义样式表，用于替代外部 CSS 框架。
+ * 该文件为 Office 365 多租户管理工具提供简洁、现代的界面风格。
+ */
+
+/* 全局字体与背景 */
+body {
+    font-family: "Segoe UI", Tahoma, sans-serif;
+    margin: 0;
+    padding: 0;
+    background-color: #f8f9fa;
+    color: #212529;
+}
+
+/* 顶部导航栏 */
+.navbar {
+    background-color: #343a40;
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.5rem 1rem;
+}
+
+.navbar a {
+    color: #fff;
+    text-decoration: none;
+    margin-right: 1rem;
+}
+
+.navbar a:hover {
+    text-decoration: underline;
+}
+
+.navbar .navbar-brand a {
+    font-size: 1.25rem;
+    font-weight: 600;
+    margin-right: 1.5rem;
+}
+
+.navbar .navbar-links a {
+    margin-right: 1.5rem;
+}
+
+.navbar .navbar-extra {
+    display: flex;
+    align-items: center;
+}
+
+.navbar .current-org {
+    font-weight: 500;
+    margin-right: 1rem;
+}
+
+/* 包含组织名称和切换箭头的容器 */
+.org-switch-wrapper {
+    display: inline-flex;
+    align-items: center;
+    margin-right: 1rem;
+}
+.current-org-label {
+    font-weight: 500;
+}
+
+/* 当前组织标题行，用于概况页突出显示 */
+.current-org-line {
+    display: flex;
+    align-items: center;
+    margin: 0.5rem 0 1rem;
+}
+/* 突出“当前组织”文本 */
+.current-org-title {
+    font-weight: 600;
+    font-size: 1rem;
+    margin-right: 0.25rem;
+}
+
+/* 突出数字统计 */
+.stat-number {
+    font-size: 2rem;
+    font-weight: 600;
+}
+
+/* 容器布局 */
+.container {
+    padding: 1rem 2rem;
+}
+
+h2 {
+    margin-top: 1rem;
+}
+
+/* 按钮样式 */
+.btn {
+    display: inline-block;
+    padding: 0.375rem 0.75rem;
+    font-size: 0.9rem;
+    font-weight: 400;
+    line-height: 1.5;
+    text-align: center;
+    text-decoration: none;
+    border-radius: 0.25rem;
+    cursor: pointer;
+    border: 1px solid transparent;
+    margin: 0.25rem;
+    transition: background-color 0.15s ease-in-out, border-color 0.15s ease-in-out;
+}
+
+.btn-primary {
+    color: #fff;
+    background-color: #0d6efd;
+    border-color: #0d6efd;
+}
+
+.btn-primary:hover {
+    background-color: #0b5ed7;
+    border-color: #0a58ca;
+}
+
+.btn-secondary {
+    color: #fff;
+    background-color: #6c757d;
+    border-color: #6c757d;
+}
+
+.btn-secondary:hover {
+    background-color: #5c636a;
+    border-color: #545b62;
+}
+
+.btn-success {
+    color: #fff;
+    background-color: #198754;
+    border-color: #198754;
+}
+
+.btn-success:hover {
+    background-color: #157347;
+    border-color: #146c43;
+}
+
+.btn-danger {
+    color: #fff;
+    background-color: #dc3545;
+    border-color: #dc3545;
+}
+
+.btn-danger:hover {
+    background-color: #bb2d3b;
+    border-color: #b02a37;
+}
+
+.btn-warning {
+    color: #212529;
+    background-color: #ffc107;
+    border-color: #ffc107;
+}
+
+.btn-warning:hover {
+    background-color: #e0a800;
+    border-color: #d39e00;
+}
+
+.btn-sm {
+    padding: 0.25rem 0.5rem;
+    font-size: 0.8rem;
+}
+
+/* 卡片组件 */
+.card {
+    background-color: #fff;
+    border: 1px solid rgba(0, 0, 0, 0.125);
+    border-radius: 0.25rem;
+    box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+    margin-bottom: 1rem;
+}
+
+.card-body {
+    padding: 1rem;
+}
+
+.card-title {
+    margin-bottom: 0.5rem;
+    font-size: 1.25rem;
+    font-weight: 500;
+}
+
+.display-6 {
+    font-size: 1.5rem;
+    font-weight: 600;
+}
+
+/* 栅格系统 */
+.row {
+    display: flex;
+    flex-wrap: wrap;
+    margin-left: -0.5rem;
+    margin-right: -0.5rem;
+}
+
+.col-md-4,
+.col-md-6 {
+    padding-left: 0.5rem;
+    padding-right: 0.5rem;
+    margin-bottom: 1rem;
+    width: 100%;
+}
+
+@media (min-width: 768px) {
+    .col-md-4 {
+        width: 33.3333%;
+    }
+    .col-md-6 {
+        width: 50%;
+    }
+}
+
+/* 表格样式 */
+.table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 1rem;
+}
+
+.table th,
+.table td {
+    padding: 0.75rem;
+    border: 1px solid #dee2e6;
+    text-align: left;
+}
+
+.table thead th {
+    background-color: #f8f9fa;
+    font-weight: 600;
+}
+
+.table-striped tbody tr:nth-child(odd) {
+    background-color: #f2f2f2;
+}
+
+.table-hover tbody tr:hover {
+    background-color: #e9ecef;
+}
+
+.table-bordered {
+    border: 1px solid #dee2e6;
+}
+
+.table-bordered th,
+.table-bordered td {
+    border: 1px solid #dee2e6;
+}
+
+/* 表单与控件 */
+.form-label {
+    display: block;
+    margin-bottom: 0.5rem;
+    font-weight: 500;
+}
+
+.form-control,
+.form-select {
+    display: block;
+    width: 100%;
+    padding: 0.375rem 0.75rem;
+    font-size: 1rem;
+    line-height: 1.5;
+    border: 1px solid #ced4da;
+    border-radius: 0.25rem;
+    background-color: #fff;
+    margin-bottom: 1rem;
+    box-sizing: border-box;
+}
+
+/* Alert 信息提示 */
+.alert {
+    padding: 0.75rem 1.25rem;
+    margin-bottom: 1rem;
+    border: 1px solid transparent;
+    border-radius: 0.25rem;
+}
+
+.alert-info {
+    color: #055160;
+    background-color: #cff4fc;
+    border-color: #b6effb;
+}
+
+/* 错误提示（红色） */
+.alert-danger {
+    color: #842029;
+    background-color: #f8d7da;
+    border-color: #f5c2c7;
+}
+
+/* 徽章/标签 */
+.badge {
+    display: inline-block;
+    padding: 0.35em 0.65em;
+    font-size: 0.75em;
+    font-weight: 700;
+    line-height: 1;
+    text-align: center;
+    white-space: nowrap;
+    vertical-align: baseline;
+    border-radius: 0.25rem;
+    margin-right: 0.25rem;
+}
+
+/* 文本颜色工具类 */
+.text-success {
+    color: #198754 !important;
+}
+.text-danger {
+    color: #dc3545 !important;
+}
+
+.bg-danger {
+    background-color: #dc3545;
+    color: #fff;
+}
+
+.bg-success {
+    background-color: #198754;
+    color: #fff;
+}
+
+.bg-primary {
+    background-color: #0d6efd;
+    color: #fff;
+}
+
+.bg-secondary {
+    background-color: #6c757d;
+    color: #fff;
+}
+
+.bg-warning {
+    background-color: #ffc107;
+    color: #212529;
+}
+
+.text-dark {
+    color: #212529 !important;
+}
+
+.text-muted {
+    color: #6c757d !important;
+}
+
+/* 组织切换下拉菜单 */
+.org-switcher {
+    position: relative;
+    display: inline-block;
+    margin-left: 0.5rem;
+}
+.org-switcher summary {
+    cursor: pointer;
+    list-style: none;
+    display: inline-block;
+    font-size: 1rem;
+    line-height: 1;
+    padding: 0 0.25rem;
+}
+/* Hide default disclosure triangle */
+.org-switcher summary::-webkit-details-marker {
+    display: none;
+}
+.org-switcher[open] > summary {
+    background-color: #e9ecef;
+    border-radius: 0.25rem;
+}
+.org-dropdown {
+    position: absolute;
+    right: 0;
+    top: 100%;
+    background-color: #fff;
+    border: 1px solid #dee2e6;
+    border-radius: 0.25rem;
+    box-shadow: 0 0.25rem 0.5rem rgba(0, 0, 0, 0.1);
+    list-style: none;
+    margin: 0;
+    padding: 0.5rem 0;
+    z-index: 1000;
+    min-width: 8rem;
+}
+.org-dropdown li {
+    padding: 0;
+    margin: 0;
+}
+.org-dropdown li a {
+    display: block;
+    padding: 0.25rem 0.75rem;
+    color: #212529;
+    text-decoration: none;
+    white-space: nowrap;
+}
+.org-dropdown li a:hover {
+    background-color: #f8f9fa;
+}
+
+/* Container for organisation switcher when used inline in content */
+.org-switch-container {
+    display: inline-block;
+    margin-left: 0.25rem;
+    vertical-align: middle;
+}
+
+/* 辅助工具类 */
+.align-items-center {
+    display: flex;
+    align-items: center;
+}
+
+.g-3 {
+    gap: 1rem;
+}
+
+/* 边距工具类 */
+.ml-2 {
+    margin-left: 0.5rem;
+}
+
+.row-cols-lg-auto > * {
+    flex: 0 0 auto;
+    width: auto;
+}
+
+.mb-3 {
+    margin-bottom: 1rem;
+}
+
+.mt-2 {
+    margin-top: 0.5rem;
+}
+
+.mt-4 {
+    margin-top: 1.5rem;
+}

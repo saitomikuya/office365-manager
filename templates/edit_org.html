@@ -1,0 +1,24 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>编辑组织</h2>
+<form method="post" action="{{ url_for('edit_org', org_id=org.id) }}" style="max-width: 500px;">
+    <div class="mb-3">
+        <label class="form-label" for="name">组织名称</label>
+        <input type="text" class="form-control" id="name" name="name" value="{{ org.name }}" required>
+    </div>
+    <div class="mb-3">
+        <label class="form-label" for="client_id">应用程序 (客户端) ID</label>
+        <input type="text" class="form-control" id="client_id" name="client_id" value="{{ org.client_id }}" required>
+    </div>
+    <div class="mb-3">
+        <label class="form-label" for="tenant_id">目录 (租户) ID</label>
+        <input type="text" class="form-control" id="tenant_id" name="tenant_id" value="{{ org.tenant_id }}" required>
+    </div>
+    <div class="mb-3">
+        <label class="form-label" for="client_secret">值 (客户端密钥)</label>
+        <input type="password" class="form-control" id="client_secret" name="client_secret" value="{{ org.client_secret }}" required>
+    </div>
+    <button type="submit" class="btn btn-primary">保存</button>
+    <a href="{{ url_for('manage_orgs') }}" class="btn btn-secondary">取消</a>
+</form>
+{% endblock %}

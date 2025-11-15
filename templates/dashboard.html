@@ -1,0 +1,57 @@
+{% extends 'base.html' %}
+{% block content %}
+
+<h2>仪表盘</h2>
+
+{# 安全警告：如果当前密码仍是默认的 'admin'，提示用户尽快修改 #}
+{% if is_default_password %}
+  <div class="alert alert-danger" role="alert">
+    当前系统仍使用默认密码 (admin)。为保障安全，请立即前往“修改密码”页面更新您的登录密码！
+  </div>
+{% endif %}
+
+{# 如果未添加任何组织，显示提示并引导用户前往组织管理 #}
+{% if total == 0 %}
+  <p>尚未添加组织。请在“组织管理”页面中添加至少一个组织以开始管理。</p>
+  <a href="{{ url_for('manage_orgs') }}" class="btn btn-primary">前往组织管理</a>
+{% else %}
+  <div class="row mt-3">
+    <div class="col-md-4">
+      <div class="card text-center">
+        <div class="card-body">
+          <h5 class="card-title">已添加组织</h5>
+          <p class="stat-number">{{ total }}</p>
+        </div>
+      </div>
+    </div>
+    <div class="col-md-4">
+      <div class="card text-center">
+        <div class="card-body">
+          <h5 class="card-title">API 可用</h5>
+          <p class="stat-number">{{ available }}</p>
+        </div>
+      </div>
+    </div>
+    <div class="col-md-4">
+      <div class="card text-center">
+        <div class="card-body">
+          <h5 class="card-title">API 不可用</h5>
+          <p class="stat-number">{{ unavailable }}</p>
+          <p class="text-muted" style="margin-top: -0.5rem;">未检测：{{ untested }}</p>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="mb-3">
+    {% if total > 0 and (available + unavailable) == 0 %}
+      <a href="{{ url_for('test_all_orgs') }}" class="btn btn-primary btn-sm">检测所有 API</a>
+    {% else %}
+      <a href="{{ url_for('test_all_orgs') }}" class="btn btn-secondary btn-sm">刷新 API 状态</a>
+    {% endif %}
+    <a href="{{ url_for('manage_orgs') }}" class="btn btn-secondary btn-sm">管理组织</a>
+    <a href="{{ url_for('list_users', reset=1) }}" class="btn btn-secondary btn-sm">用户管理</a>
+    <a href="{{ url_for('change_password') }}" class="btn btn-secondary btn-sm">修改密码</a>
+  </div>
+{% endif %}
+
+{% endblock %}

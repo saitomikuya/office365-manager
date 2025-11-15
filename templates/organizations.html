@@ -1,0 +1,93 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>组织管理</h2>
+
+{# 已配置的组织列表 #}
+<h3>已配置的组织</h3>
+<div class="card mb-4">
+    <div class="card-body">
+        {% if organizations %}
+        <div class="mb-2">
+            <a href="{{ url_for('test_all_orgs') }}" class="btn btn-sm btn-primary">测试全部 API</a>
+        </div>
+        <table class="table table-striped">
+            <thead>
+                <tr>
+                    <th>组织名称</th>
+                    <th>客户端 ID</th>
+                    <th>API 状态</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for org in organizations %}
+                <tr>
+                    <td>{{ org.name }}</td>
+                    <td>{{ org.client_id }}</td>
+                    <td>
+                        {% set status = org_api_status.get(org.id) %}
+                        {% if status is none %}
+                            <span class="text-muted">未测试</span>
+                        {% elif status %}
+                            <span class="badge bg-success">可用</span>
+                        {% else %}
+                            <span class="badge bg-danger">不可用</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {# 管理按钮跳转至用户管理并显示概况 #}
+                        <a href="{{ url_for('select_org', org_id=org.id, next=url_for('list_users', view='summary')) }}" class="btn btn-sm btn-primary">管理</a>
+                        <a href="{{ url_for('edit_org', org_id=org.id) }}" class="btn btn-sm btn-secondary">编辑</a>
+                        <a href="{{ url_for('test_org', org_id=org.id) }}" class="btn btn-sm btn-warning">测试 API</a>
+                        <a href="{{ url_for('delete_org', org_id=org.id) }}" class="btn btn-sm btn-danger" onclick="return confirm('确认删除此组织吗？');">删除</a>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <p>暂无组织，请先添加。</p>
+        {% endif %}
+    </div>
+</div>
+
+{# 添加新组织 #}
+<h3>添加新组织</h3>
+<div class="card mb-4">
+    <div class="card-body">
+        <form method="post" action="{{ url_for('manage_orgs') }}">
+            <div class="mb-3">
+                <label class="form-label" for="name">组织名称</label>
+                <input type="text" class="form-control" id="name" name="name" required>
+            </div>
+            <div class="mb-3">
+                <label class="form-label" for="client_id">应用程序 (客户端) ID</label>
+                <input type="text" class="form-control" id="client_id" name="client_id" required>
+            </div>
+            <div class="mb-3">
+                <label class="form-label" for="tenant_id">目录 (租户) ID</label>
+                <input type="text" class="form-control" id="tenant_id" name="tenant_id" required>
+            </div>
+            <div class="mb-3">
+                <label class="form-label" for="client_secret">值 (客户端密钥)</label>
+                <input type="password" class="form-control" id="client_secret" name="client_secret" required>
+            </div>
+            <button type="submit" class="btn btn-primary">保存</button>
+        </form>
+    </div>
+</div>
+
+{# 批量导入组织 #}
+<h3>批量导入组织</h3>
+<div class="card mb-4">
+    <div class="card-body">
+        <p>请先<a href="{{ url_for('download_org_template') }}">下载模板</a>，按照模板填写组织信息后上传：</p>
+        <form method="post" action="{{ url_for('import_orgs') }}" enctype="multipart/form-data">
+            <div class="mb-3">
+                <input type="file" name="file" accept=".csv" class="form-control" required>
+            </div>
+            <button type="submit" class="btn btn-primary">上传并导入</button>
+        </form>
+    </div>
+</div>
+{% endblock %}
