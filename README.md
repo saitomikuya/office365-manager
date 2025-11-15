@@ -17,7 +17,7 @@ docker run -d -p 5000:5000 --name office365-manager saitomikuya/office365-manage
 - **多租户支持**：通过网页添加多个组织（租户）的应用程序 ID、目录 ID 及密钥，并在用户管理界面方便地切换不同组织进行操作。
 - **权限安全**：系统使用登录密码保护，除拥有密码的管理员外无法访问。密码采用哈希形式存储在 `config.json` 文件中，登录成功后可在“修改密码”页面修改。
 - **用户管理**：
-  - 支持分页查询所有用户，不再局限于前 200 个。可以选择每页显示的数量（50、100 或 200），并通过页码快速跳转到任意页；也可以按显示名称、登录名、姓或名搜索用户。
+  - 支持分页查询所有用户，可以选择每页显示的数量（50、100 或 200），并通过页码快速跳转到任意页；也可以按显示名称、登录名、姓或名搜索用户。
   - 用户列表显示显示名称、姓、名、登录名、角色等信息，可以按“全局管理员”或“特权角色管理员”筛选，并显示当前页用户的角色状态。
   - 查看单个用户的详情，包括角色列表、订阅（许可证）以及账户启用状态。
   - 提供重置密码、调整角色（普通用户、全局管理员、特权角色管理员）、分配订阅和启用/禁用账户等管理功能。
@@ -51,39 +51,6 @@ docker run -d -p 5000:5000 --name office365-manager saitomikuya/office365-manage
      -v /path/to/persist/config.json:/usr/src/app/office365-manager/config.json \
      --name office365-manager office365-manager
    ```
-
-5. （可选）**自定义许可映射**：项目根目录提供了 `sku_product_mapping.json` 文件，包含 Microsoft 365/Office 365 的 SKU 与产品名称的完整对应关系。本应用在启动时会自动加载该文件并覆盖默认映射。如果 Microsoft 发布了新的 SKU，您可以更新此 JSON 文件（例如通过 Excel 转换脚本生成），然后重启容器即可生效。
-
-这样即使删除容器，配置文件也会保留在宿主机的 `/path/to/persist/config.json` 位置。
-
-## 🔄 上传镜像到 DockerHub
-
-如果您拥有 DockerHub 账号（如 `saitomikuya`），并希望将自己构建的镜像分享给他人，可以按照以下步骤推送：
-
-1. 在本地构建好镜像（名称假设为 `office365-manager`）。
-2. 使用您的 DockerHub 账号登录：
-
-   ```bash
-   docker login -u saitomikuya
-   ```
-
-   系统会提示您输入密码。登录成功后即可推送镜像。
-
-3. 给镜像打标签，使其名称匹配您的仓库：
-
-   ```bash
-   docker tag office365-manager saitomikuya/office365-manager:latest
-   ```
-
-   如果需要特定版本号，可以将 `latest` 替换为其他标签。
-
-4. 推送镜像到 DockerHub：
-
-   ```bash
-   docker push saitomikuya/office365-manager:latest
-   ```
-
-   完成后，其他用户即可通过 `docker pull saitomikuya/office365-manager:latest` 拉取镜像并按照“快速启动”章节的命令运行。
 
 ## 📁 项目结构概览
 
