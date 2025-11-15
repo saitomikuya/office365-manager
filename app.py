@@ -3,7 +3,7 @@ import json
 import uuid
 import hashlib
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 from flask import (Flask, render_template, request, redirect, url_for,
@@ -30,6 +30,83 @@ token_cache: Dict[str, Dict[str, Any]] = {}
 # (False), or has not yet been performed (None).  These statuses are not
 # persisted across server restarts.
 org_api_status: Dict[str, Optional[bool]] = {}
+
+# ---------------------------------------------------------------------------
+# Licence SKU to product name mapping
+#
+# Microsoft Graph's subscribedSkus endpoint returns SKU identifiers via the
+# ``skuPartNumber`` field but does not provide friendly product names.  To
+# present a more meaningful label in the organisation overview, we map
+# commonly encountered SKU identifiers to human‑readable product names.
+# This mapping is not exhaustive; unknown identifiers are transformed into
+# a title‑cased string (e.g. ``O365_BUSINESS_BASIC`` becomes
+# ``O365 Business Basic``).  Administrators may expand this dictionary to
+# cover additional licences specific to their tenants.
+
+SKU_PRODUCT_NAMES: Dict[str, str] = {
+    # Office 365 企业版
+    'ENTERPRISEPACK': 'Office 365 企业版 E3',
+    'ENTERPRISEPREMIUM': 'Office 365 企业版 E5',
+    'STANDARDPACK': 'Office 365 企业版 E1',
+    # Microsoft 365 企业版/商业版
+    'SPE_E3': 'Microsoft 365 E3',
+    'SPE_E5': 'Microsoft 365 E5',
+    'SPE_F3': 'Microsoft 365 F3',
+    'SPE_F1': 'Microsoft 365 F1',
+    'M365_BUSINESS_PREMIUM': 'Microsoft 365 商业高级版',
+    'M365_BUSINESS_STANDARD': 'Microsoft 365 商业标准版',
+    'M365_BUSINESS_BASIC': 'Microsoft 365 商业基础版',
+    # Office 365 商业版（旧名称）
+    'O365_BUSINESS_PREMIUM': 'Office 365 商业高级版',
+    'O365_BUSINESS_ESSENTIALS': 'Office 365 商业基础版',
+    # 企业移动性与安全套件
+    'EMS': '企业移动性与安全性套件',
+    # 学生/教师版 Office 365 A1
+    'STANDARDWOFFPACK_STUDENT': '面向学生的 Office 365 A1',
+    'STANDARDWOFFPACK_FACULTY': '面向教师的 Office 365 A1',
+    # 留出更多扩展项供管理员自定义
+    # 'SOME_OTHER_SKU': '产品中文名称',
+}
+
+# Attempt to extend the static SKU mapping with entries from an external JSON file.
+# A full mapping file (sku_product_mapping.json) may be placed alongside this
+# script.  If present, it should contain a JSON object mapping SKU identifiers
+# ("SKU名称") to product names ("产品名称").  Loading the file at runtime
+# allows administrators to update the mapping without modifying code.  Any
+# entries in the external file will override the default values defined above.
+mapping_file_path = os.path.join(os.path.dirname(__file__), 'sku_product_mapping.json')
+if os.path.exists(mapping_file_path):
+    try:
+        with open(mapping_file_path, 'r', encoding='utf-8') as f:
+            external_mapping = json.load(f)
+        if isinstance(external_mapping, dict):
+            # Update and override existing entries
+            SKU_PRODUCT_NAMES.update({k: v for k, v in external_mapping.items() if isinstance(k, str) and isinstance(v, str)})
+    except Exception as exc:
+        # Log error to console but continue gracefully
+        print(f"Failed to load SKU mapping file: {exc}")
+
+
+def get_product_name_for_sku(sku_part_number: Optional[str]) -> str:
+    """Translate a SKU part number to a friendly product name.
+
+    If the SKU is found in the predefined mapping, the corresponding
+    product name is returned.  Otherwise, a generic transformation is
+    applied: underscores are replaced by spaces and the result is
+    title‑cased.  If no part number is provided, an empty string is
+    returned.
+
+    :param sku_part_number: The SKU identifier returned by Graph API.
+    :return: A human‑readable product name.
+    """
+    if not sku_part_number:
+        return ''
+    # Return mapped name if available
+    if sku_part_number in SKU_PRODUCT_NAMES:
+        return SKU_PRODUCT_NAMES[sku_part_number]
+    # Fallback: replace underscores and capitalise words
+    return sku_part_number.replace('_', ' ').title()
+
 
 
 def load_config() -> Dict[str, Any]:
@@ -168,6 +245,14 @@ def graph_request(org: Dict[str, str], method: str, endpoint: str,
 # found this returns None.  This function caches results locally to avoid
 # repeated API calls for the same role name.
 _role_cache: Dict[str, str] = {}
+
+# Global paging cache for user lists.  Keys are tuples of
+# (organisation ID, search query, role filter, page size).  Each entry
+# stores a dict containing a list of pages and the nextLink returned by
+# the Graph API.  This allows pagination of large user lists without
+# retrieving all users at once.  Note: this cache is not persisted and
+# will reset when the application restarts.
+user_paging_cache: Dict[Tuple[str, str, str, int], Dict[str, Any]] = {}
 
 
 def get_role_definition_id(org: Dict[str, str], display_name: str) -> Optional[str]:
@@ -516,30 +601,35 @@ def select_org(org_id: str) -> Any:
 
 @app.route('/users')
 def list_users() -> Any:
-    """User management page.
+    """User management page with optional search and pagination.
 
     This view serves multiple purposes depending on the state:
 
-    * When no organisation has been selected (session['org_id'] is absent),
+    * When no organisation has been selected (``session['org_id']`` is absent),
       the page displays a list of available organisations for selection.
-    * Once an organisation is selected and the `view` query parameter is not
-      present or equals `'summary'`, a summary of the organisation is shown,
+    * Once an organisation is selected and the ``view`` query parameter is not
+      present or equals ``'summary'``, a summary of the organisation is shown,
       including licence usage and counts of administrators.  This avoids an
       expensive user list query on initial load.
-    * When `view=users` is specified, the user list is fetched.  An optional
-      `role` query parameter filters users by administrative role.
+    * When ``view=users`` is specified, the user list is fetched.  An optional
+      ``role`` query parameter filters users by administrative role.  Paging
+      parameters ``page`` and ``page_size`` control how many users to show per
+      page.  A ``search`` query parameter allows filtering by display name
+      or user principal name.
     """
     # If a reset flag is present, clear any previously selected organisation
     if request.args.get('reset'):
         session.pop('org_id', None)
+        # Clear paging cache when resetting organisation selection
+        user_paging_cache.clear()
     # Determine if an organisation has been selected via the session
     org_id = session.get('org_id')
     # Determine which view to show: summary or user list
     view_mode = request.args.get('view', 'summary')
     role_filter = request.args.get('role', '')
 
+    # If no organisation is selected, show selection list
     if not org_id:
-        # No active organisation – show selection list
         return render_template(
             'users.html',
             mode='select',
@@ -553,13 +643,13 @@ def list_users() -> Any:
     if not org:
         flash('组织配置错误。')
         session.pop('org_id', None)
+        # Clear caches for invalid organisation
+        user_paging_cache.clear()
         return redirect(url_for('list_users'))
 
-    # Show summary view by default
+    # Summary view by default
     if view_mode != 'users':
-        # Before computing summary, verify the API is available.  If the test
-        # fails, record the status and display an error message instead of
-        # loading any further data.
+        # Verify API connectivity before loading summary
         api_resp = graph_request(org, 'GET', '/subscribedSkus')
         if api_resp is None:
             org_api_status[org_id] = False
@@ -569,20 +659,24 @@ def list_users() -> Any:
                 organizations=config.get('organizations', []),
                 active_org_id=org_id
             )
-        # API is available; record status and proceed to build summary
+        # API is available; record status and compute summary
         org_api_status[org_id] = True
         summary: Dict[str, Any] = {}
-        licences = []
+        licences: List[Dict[str, Any]] = []
         if api_resp and 'value' in api_resp:
             for sku in api_resp['value']:
                 prepaid = sku.get('prepaidUnits', {})
+                sku_part = sku.get('skuPartNumber')
                 licences.append({
-                    'skuPartNumber': sku.get('skuPartNumber'),
+                    # Friendly product name for display
+                    'productName': get_product_name_for_sku(sku_part),
+                    # Original SKU identifier for reference
+                    'skuPartNumber': sku_part,
                     'enabled': prepaid.get('enabled'),
                     'used': sku.get('consumedUnits')
                 })
         summary['licences'] = licences
-        # Count Global Administrators and Privileged Role Administrators
+        # Count Global and Privileged administrators
         global_admin_count = 0
         privileged_admin_count = 0
         ga_id = get_role_definition_id(org, 'Global Administrator')
@@ -595,9 +689,7 @@ def list_users() -> Any:
             privileged_admin_count = len(pra_assignments.get('value', [])) if pra_assignments else 0
         summary['global_admin_count'] = global_admin_count
         summary['privileged_admin_count'] = privileged_admin_count
-        # Attempt to retrieve total user count via the /users/$count endpoint.
-        # This requires the ConsistencyLevel header; if not supported, we
-        # fall back to None and omit the total user count from the summary.
+        # Retrieve total user count if possible
         total_users: Optional[int] = None
         count_resp = graph_request(org, 'GET', '/users/$count', extra_headers={'ConsistencyLevel': 'eventual'})
         try:
@@ -614,26 +706,145 @@ def list_users() -> Any:
             active_org_id=org_id
         )
 
-    # view_mode == 'users' – fetch user list with optional role filter
+    # view_mode == 'users' – build user list with pagination and search
+    # Parse paging and search parameters
+    try:
+        page = int(request.args.get('page', '1'))
+        if page < 1:
+            page = 1
+    except ValueError:
+        page = 1
+    try:
+        page_size = int(request.args.get('page_size', '50'))
+        # Limit page_size to a reasonable range (10–200)
+        if page_size < 10:
+            page_size = 10
+        if page_size > 200:
+            page_size = 200
+    except ValueError:
+        page_size = 50
+    search_query = request.args.get('search', '').strip()
+
     users: List[Dict[str, Any]] = []
+    has_next: bool = False
+    has_prev: bool = page > 1
+
+    total_pages: Optional[int] = None  # Number of pages for page navigation
     if role_filter:
-        # Fetch the role definition ID for the given display name
+        # When a specific role is selected, fetch all assignments and then page locally.
         role_id = get_role_definition_id(org, role_filter)
         if not role_id:
             flash(f'无法找到角色 {role_filter}。')
             return redirect(url_for('list_users'))
-        # Retrieve all role assignments for the specified role
         assignments = graph_request(org, 'GET', '/roleManagement/directory/roleAssignments', params={'$filter': f"roleDefinitionId eq '{role_id}'"})
         principal_ids = [a['principalId'] for a in assignments.get('value', [])]
+        # Fetch user details for each principal ID
+        all_users: List[Dict[str, Any]] = []
         for uid in principal_ids:
-            user_data = graph_request(org, 'GET', f'/users/{uid}', params={'$select': 'id,displayName,userPrincipalName,mail'})
+            # Include givenName and surname when selecting fields
+            user_data = graph_request(org, 'GET', f'/users/{uid}', params={'$select': 'id,displayName,userPrincipalName,mail,givenName,surname'})
             if user_data:
-                users.append(user_data)
+                # Apply search filtering if provided; match displayName, UPN, givenName or surname
+                if search_query:
+                    q = search_query.lower()
+                    dn = (user_data.get('displayName') or '').lower()
+                    upn = (user_data.get('userPrincipalName') or '').lower()
+                    given = (user_data.get('givenName') or '').lower()
+                    sur = (user_data.get('surname') or '').lower()
+                    if not (dn.startswith(q) or upn.startswith(q) or given.startswith(q) or sur.startswith(q)):
+                        continue
+                all_users.append(user_data)
+        # Determine total pages based on page_size
+        total_pages = (len(all_users) + page_size - 1) // page_size
+        # Bound the page number
+        if page > total_pages and total_pages > 0:
+            page = total_pages
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+        users = all_users[start_idx:end_idx]
+        has_prev = page > 1
+        has_next = page < total_pages
     else:
-        # Without a filter, fetch the first 200 users
-        response = graph_request(org, 'GET', '/users', params={'$select': 'id,displayName,userPrincipalName,mail', '$top': '200'})
-        users = response.get('value', []) if response else []
-    # Fetch admin assignments to mark global and privileged admins
+        # No role filter: use paging cache and Graph API nextLink to avoid refetching
+        cache_key = (org_id, search_query.lower(), role_filter, page_size)
+        cache_entry = user_paging_cache.get(cache_key)
+        if not cache_entry:
+            cache_entry = {'pages': [], 'next_link': None}
+            user_paging_cache[cache_key] = cache_entry
+        pages: List[List[Dict[str, Any]]] = cache_entry['pages']
+        next_link = cache_entry.get('next_link')
+        # Fetch pages until we have at least the desired page or no more data
+        while len(pages) < page and (next_link or not pages):
+            if not pages:
+                # Fetch first page
+                params: Dict[str, str] = {
+                    '$select': 'id,displayName,userPrincipalName,mail,givenName,surname',
+                    '$top': str(page_size)
+                }
+                # Apply search filter if provided
+                if search_query:
+                    # Use startswith for displayName, userPrincipalName, givenName and surname
+                    safe_q = search_query.replace("'", "''")
+                    params['$filter'] = (
+                        f"startswith(displayName,'{safe_q}') or startswith(userPrincipalName,'{safe_q}') "
+                        f"or startswith(givenName,'{safe_q}') or startswith(surname,'{safe_q}')"
+                    )
+                response = graph_request(org, 'GET', '/users', params=params)
+                if not response:
+                    break
+                page_users = response.get('value', [])
+                pages.append(page_users)
+                # Capture nextLink if present
+                next_link = response.get('@odata.nextLink')
+                cache_entry['next_link'] = next_link
+            else:
+                # Fetch the next page using the stored nextLink
+                if not next_link:
+                    break
+                # Next link is a full URL; extract the path after the domain
+                prefix = 'https://graph.microsoft.com/v1.0'
+                if next_link.startswith(prefix):
+                    next_endpoint = next_link[len(prefix):]
+                else:
+                    next_endpoint = next_link
+                response = graph_request(org, 'GET', next_endpoint)
+                if not response:
+                    break
+                page_users = response.get('value', [])
+                pages.append(page_users)
+                next_link = response.get('@odata.nextLink')
+                cache_entry['next_link'] = next_link
+        # Determine page bounds
+        if page > len(pages) and len(pages) > 0:
+            page = len(pages)
+        if len(pages) > 0:
+            users = pages[page - 1]
+        has_prev = page > 1
+        # Next page exists if there are more pages in cache or a nextLink
+        has_next = (page < len(pages)) or (cache_entry.get('next_link') is not None and len(pages) == page)
+
+        # Compute total pages for navigation.  When search filtering is applied or no role filter is used,
+        # query the Graph API for the count of matching users to determine the number of pages.  If the
+        # count request fails, fall back to estimating based on whether a next page exists.
+        try:
+            count_params: Dict[str, str] = {}
+            if search_query:
+                safe_q = search_query.replace("'", "''")
+                count_params['$filter'] = (
+                    f"startswith(displayName,'{safe_q}') or startswith(userPrincipalName,'{safe_q}') "
+                    f"or startswith(givenName,'{safe_q}') or startswith(surname,'{safe_q}')"
+                )
+            count_resp = graph_request(org, 'GET', '/users/$count', params=count_params, extra_headers={'ConsistencyLevel': 'eventual'})
+            if count_resp is not None:
+                total_count = int(count_resp)
+                total_pages = (total_count + page_size - 1) // page_size if total_count > 0 else 1
+            else:
+                total_pages = page + 1 if has_next else page
+        except Exception:
+            # On any error, approximate total pages based on current page and next
+            total_pages = page + 1 if has_next else page
+
+    # Fetch admin assignments once to mark roles for current page
     global_admin_set: set = set()
     privileged_admin_set: set = set()
     ga_id = get_role_definition_id(org, 'Global Administrator')
@@ -644,16 +855,29 @@ def list_users() -> Any:
     if pra_id:
         pra_assignments = graph_request(org, 'GET', '/roleManagement/directory/roleAssignments', params={'$filter': f"roleDefinitionId eq '{pra_id}'"})
         privileged_admin_set = {a['principalId'] for a in pra_assignments.get('value', [])}
-    # Annotate users
+    # Annotate users with role flags
     for u in users:
         uid = u.get('id')
         u['is_global_admin'] = uid in global_admin_set
         u['is_privileged_admin'] = uid in privileged_admin_set
+    # Build a list of page numbers to display around the current page for navigation (max 5 pages)
+    if total_pages is None or total_pages < 1:
+        total_pages = 1
+    start_page = max(1, page - 2)
+    end_page = min(total_pages, page + 2)
+    page_numbers = list(range(start_page, end_page + 1))
     return render_template(
         'users.html',
         mode='list',
         users=users,
         role_filter=role_filter,
+        search=search_query,
+        page=page,
+        page_size=page_size,
+        has_prev=has_prev,
+        has_next=has_next,
+        total_pages=total_pages,
+        page_numbers=page_numbers,
         organizations=config.get('organizations', []),
         active_org_id=org_id
     )

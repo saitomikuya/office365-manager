@@ -113,6 +113,7 @@
   <table class="table table-bordered">
     <thead>
       <tr>
+        <th>产品名称</th>
         <th>SKU 名称</th>
         <th>已启用数量</th>
         <th>已使用数量</th>
@@ -121,12 +122,13 @@
     <tbody>
       {% for lic in summary.licences %}
         <tr>
+          <td>{{ lic.productName }}</td>
           <td>{{ lic.skuPartNumber }}</td>
           <td>{{ lic.enabled }}</td>
           <td>{{ lic.used }}</td>
         </tr>
       {% else %}
-        <tr><td colspan="3">无订阅信息。</td></tr>
+        <tr><td colspan="4">无订阅信息。</td></tr>
       {% endfor %}
     </tbody>
   </table>
@@ -136,9 +138,15 @@
 
 {% elif mode == 'list' %}
   <h2>用户列表 - {{ get_org(active_org_id).name }}</h2>
+  {# Search and filter form #}
   <div class="mb-3">
     <form class="row row-cols-lg-auto g-3 align-items-center" method="get" action="{{ url_for('list_users') }}">
       <input type="hidden" name="view" value="users">
+      <input type="hidden" name="page" value="1">
+      <div class="col-12">
+        <label for="search" class="form-label">搜索用户</label>
+        <input id="search" name="search" type="text" class="form-control" value="{{ search }}" placeholder="按显示名称、登录名、姓或名搜索">
+      </div>
       <div class="col-12">
         <label for="role" class="form-label">筛选角色</label>
         <select id="role" name="role" class="form-select">
@@ -148,7 +156,15 @@
         </select>
       </div>
       <div class="col-12">
-        <button type="submit" class="btn btn-primary">应用筛选</button>
+        <label for="page_size" class="form-label">每页数量</label>
+        <select id="page_size" name="page_size" class="form-select">
+          <option value="50" {% if page_size == 50 %}selected{% endif %}>50</option>
+          <option value="100" {% if page_size == 100 %}selected{% endif %}>100</option>
+          <option value="200" {% if page_size == 200 %}selected{% endif %}>200</option>
+        </select>
+      </div>
+      <div class="col-12">
+        <button type="submit" class="btn btn-primary">应用</button>
       </div>
       <div class="col-12">
         <a href="{{ url_for('list_users') }}" class="btn btn-secondary">返回概况</a>
@@ -159,6 +175,8 @@
     <thead>
       <tr>
         <th>显示名称</th>
+        <th>姓</th>
+        <th>名</th>
         <th>登录名</th>
         <th>管理员角色</th>
         <th>操作</th>
@@ -168,6 +186,8 @@
       {% for user in users %}
         <tr>
           <td>{{ user.displayName }}</td>
+          <td>{{ user.surname or '—' }}</td>
+          <td>{{ user.givenName or '—' }}</td>
           <td>{{ user.userPrincipalName }}</td>
           <td>
             {% if user.is_global_admin %}<span class="badge bg-danger">全局管理员</span>{% endif %}
@@ -180,10 +200,43 @@
         </tr>
       {% endfor %}
       {% if users|length == 0 %}
-        <tr><td colspan="4">未找到用户。</td></tr>
+        <tr><td colspan="6">未找到用户。</td></tr>
       {% endif %}
     </tbody>
   </table>
+  {# Pagination controls #}
+  <div class="d-flex justify-content-between align-items-center mt-3">
+    <div>
+      共 {{ total_pages }} 页，当前第 {{ page }} 页
+    </div>
+    <nav>
+      <ul class="pagination mb-0">
+        <li class="page-item {% if not has_prev %}disabled{% endif %}">
+          {% if has_prev %}
+            <a class="page-link" href="{{ url_for('list_users', view='users', page=page-1, page_size=page_size, search=search, role=role_filter) }}">上一页</a>
+          {% else %}
+            <span class="page-link">上一页</span>
+          {% endif %}
+        </li>
+        {% for p in page_numbers %}
+          <li class="page-item {% if p == page %}active{% endif %}">
+            {% if p == page %}
+              <span class="page-link">{{ p }}</span>
+            {% else %}
+              <a class="page-link" href="{{ url_for('list_users', view='users', page=p, page_size=page_size, search=search, role=role_filter) }}">{{ p }}</a>
+            {% endif %}
+          </li>
+        {% endfor %}
+        <li class="page-item {% if not has_next %}disabled{% endif %}">
+          {% if has_next %}
+            <a class="page-link" href="{{ url_for('list_users', view='users', page=page+1, page_size=page_size, search=search, role=role_filter) }}">下一页</a>
+          {% else %}
+            <span class="page-link">下一页</span>
+          {% endif %}
+        </li>
+      </ul>
+    </nav>
+  </div>
 
 {% endif %}
 
