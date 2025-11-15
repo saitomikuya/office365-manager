@@ -1,0 +1,887 @@
+import os
+import json
+import uuid
+import hashlib
+import time
+from typing import Any, Dict, List, Optional
+
+import requests
+from flask import (Flask, render_template, request, redirect, url_for,
+                   session, flash)
+from msal import ConfidentialClientApplication
+
+# Path to the configuration file used to store the hashed password and
+# organization connection details.  The configuration file is persisted on
+# disk so that organizations and passwords survive container restarts.
+CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'config.json')
+
+# Initialise the Flask application.  A secret key is required for session
+# management.  In production you should override this via the environment.
+app = Flask(__name__)
+app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'changeme-secret')
+
+# In‑memory cache for access tokens.  Keys are organisation IDs and values are
+# dicts containing the token and its expiry time.  This reduces the number of
+# authentication requests and helps minimise API calls.
+token_cache: Dict[str, Dict[str, Any]] = {}
+
+# In‑memory API test status for organisations.  The key is an organisation ID
+# and the value indicates whether the last API test succeeded (True), failed
+# (False), or has not yet been performed (None).  These statuses are not
+# persisted across server restarts.
+org_api_status: Dict[str, Optional[bool]] = {}
+
+
+def load_config() -> Dict[str, Any]:
+    """Load the configuration from disk, creating defaults if necessary."""
+    if not os.path.exists(CONFIG_FILE):
+        # On first run initialise the configuration with a default password
+        # (hash of 'admin') and an empty organisation list.  The user should
+        # immediately change this password after first login.
+        default_config = {
+            "password_hash": hashlib.sha256("admin".encode()).hexdigest(),
+            "organizations": []
+        }
+        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(default_config, f, indent=4)
+        return default_config
+    with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+
+def save_config(config: Dict[str, Any]) -> None:
+    """Persist the configuration dictionary to disk."""
+    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+        json.dump(config, f, indent=4, ensure_ascii=False)
+
+
+config = load_config()
+
+
+def verify_password(password: str) -> bool:
+    """Check if a provided password matches the stored hash."""
+    return hashlib.sha256(password.encode()).hexdigest() == config.get("password_hash")
+
+
+def set_password(new_password: str) -> None:
+    """Update the stored password hash and save the configuration."""
+    config["password_hash"] = hashlib.sha256(new_password.encode()).hexdigest()
+    save_config(config)
+
+
+def get_org(org_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieve an organisation record by its ID from the configuration."""
+    for org in config.get("organizations", []):
+        if org.get("id") == org_id:
+            return org
+    return None
+
+
+def get_access_token(org: Dict[str, str]) -> Optional[str]:
+    """Acquire an access token for the Microsoft Graph API using client credentials.
+
+    Tokens are cached until shortly before expiration to avoid excessive
+    authentication requests.  If the token has expired or is about to expire,
+    a new one is fetched using the MSAL library.
+    """
+    # Check the in‑memory cache first
+    cache_entry = token_cache.get(org['id'])
+    if cache_entry and cache_entry.get('expires_at', 0) > time.time() + 60:
+        return cache_entry['access_token']
+
+    authority = f"https://login.microsoftonline.com/{org['tenant_id']}"
+    client = ConfidentialClientApplication(
+        client_id=org['client_id'],
+        client_credential=org['client_secret'],
+        authority=authority
+    )
+
+    # Attempt to silently obtain a token from the MSAL cache.  This may fail
+    # when no token has been cached yet, so fall back to acquiring a new one.
+    result = client.acquire_token_silent(
+        scopes=["https://graph.microsoft.com/.default"], account=None
+    )
+    if not result:
+        result = client.acquire_token_for_client(
+            scopes=["https://graph.microsoft.com/.default"]
+        )
+
+    if 'access_token' in result:
+        token_cache[org['id']] = {
+            'access_token': result['access_token'],
+            'expires_at': time.time() + result.get('expires_in', 3600)
+        }
+        return result['access_token']
+    # Authentication failed
+    return None
+
+
+def graph_request(org: Dict[str, str], method: str, endpoint: str,
+                  params: Optional[Dict[str, str]] = None,
+                  data: Optional[Dict[str, Any]] = None,
+                  extra_headers: Optional[Dict[str, str]] = None) -> Any:
+    """Send an authenticated request to the Microsoft Graph API for a specific organisation.
+
+    :param org: The organisation configuration containing tenant and client
+        credentials.
+    :param method: HTTP method (GET, POST, PATCH, etc.).
+    :param endpoint: API endpoint starting with a slash (e.g., '/users').
+    :param params: Optional query parameters.
+    :param data: Optional JSON body for POST/PATCH requests.
+    :param extra_headers: Optional additional HTTP headers to include in the request.
+        This can be used, for example, to specify the 'ConsistencyLevel' header when
+        requesting counts via '/users/$count'.
+    :return: Parsed JSON response, plain text response (for $count), or None if an error occurs.
+    """
+    token = get_access_token(org)
+    if not token:
+        return None
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+    # Merge in any extra headers provided by the caller
+    if extra_headers:
+        headers.update(extra_headers)
+    url = f"https://graph.microsoft.com/v1.0{endpoint}"
+    try:
+        response = requests.request(method, url, headers=headers, params=params, json=data)
+        # If the token has expired, clear the cache entry so the next call will refresh
+        if response.status_code == 401:
+            token_cache.pop(org['id'], None)
+            return None
+        response.raise_for_status()
+        # No content
+        if response.status_code == 204:
+            return None
+        # The /$count endpoints return a plain integer in the body as text/plain
+        if endpoint.endswith('/$count') or endpoint.endswith('$count'):
+            return response.text.strip()
+        # For other endpoints return the JSON body
+        return response.json()
+    except requests.RequestException as exc:
+        print(f"Graph API error on {endpoint}: {exc}")
+        return None
+
+
+# Helper to fetch a role definition ID by display name.  If the role is not
+# found this returns None.  This function caches results locally to avoid
+# repeated API calls for the same role name.
+_role_cache: Dict[str, str] = {}
+
+
+def get_role_definition_id(org: Dict[str, str], display_name: str) -> Optional[str]:
+    if display_name in _role_cache:
+        return _role_cache[display_name]
+    params = {
+        '$filter': f"displayName eq '{display_name}'",
+        '$select': 'id,displayName'
+    }
+    resp = graph_request(org, 'GET', '/roleManagement/directory/roleDefinitions', params=params)
+    if resp and 'value' in resp and resp['value']:
+        role_id = resp['value'][0]['id']
+        _role_cache[display_name] = role_id
+        return role_id
+    return None
+
+
+@app.before_request
+def require_login() -> None:
+    """Redirect to the login page when the user is not authenticated.
+
+    Certain routes (static assets and login pages) are exempted.  This
+    provides simple password protection for the entire web application.
+    """
+    allowed_routes = {'login', 'do_login', 'static'}
+    if request.endpoint in allowed_routes or request.endpoint is None:
+        return
+    if not session.get('logged_in'):
+        return redirect(url_for('login'))
+
+
+@app.route('/login', methods=['GET'])
+def login() -> Any:
+    """Render the login form."""
+    return render_template('login.html')
+
+
+@app.route('/login', methods=['POST'])
+def do_login() -> Any:
+    """Handle login form submission."""
+    password = request.form.get('password', '')
+    if verify_password(password):
+        session['logged_in'] = True
+        return redirect(url_for('dashboard'))
+    flash('密码错误，请重试。')
+    return redirect(url_for('login'))
+
+
+@app.route('/logout')
+def logout() -> Any:
+    """Clear the session and log the user out."""
+    session.clear()
+    return redirect(url_for('login'))
+
+
+@app.route('/')
+def index() -> Any:
+    """Redirect the root URL to the dashboard.
+
+    The dashboard provides a summary of organisations and API status.  By
+    redirecting the root to the dashboard the application has a clear
+    landing page for administrators after login.
+    """
+    return redirect(url_for('dashboard'))
+
+
+@app.route('/dashboard')
+def dashboard() -> Any:
+    """Show a high‑level overview of configured organisations and API status.
+
+    The dashboard summarises how many organisations have been added and
+    provides counts of API connectivity status (available, unavailable,
+    untested).  A button allows the administrator to perform or refresh
+    API tests across all organisations.  If the default login password
+    has not been changed from 'admin', a warning banner is displayed at
+    the top to encourage updating the password for security.
+    """
+    # Gather organisation list and total count
+    orgs = config.get('organizations', [])
+    total = len(orgs)
+    # Count API status categories
+    available = 0
+    unavailable = 0
+    for oid in org_api_status:
+        status = org_api_status.get(oid)
+        if status is True:
+            available += 1
+        elif status is False:
+            unavailable += 1
+    # Organisations whose status has not been tested
+    untested = total - available - unavailable
+    # Determine if the login password is still the default 'admin'
+    default_hash = hashlib.sha256("admin".encode()).hexdigest()
+    is_default_password = config.get("password_hash") == default_hash
+    return render_template(
+        'dashboard.html',
+        organizations=orgs,
+        total=total,
+        available=available,
+        unavailable=unavailable,
+        untested=untested,
+        is_default_password=is_default_password,
+        active_org_id=session.get('org_id')
+    )
+
+
+@app.route('/set_password', methods=['GET', 'POST'])
+def change_password() -> Any:
+    """Allow the administrator to change the login password."""
+    if request.method == 'POST':
+        current_pw = request.form.get('current_password', '')
+        new_pw = request.form.get('new_password', '')
+        confirm_pw = request.form.get('confirm_password', '')
+        if not verify_password(current_pw):
+            flash('当前密码不正确。')
+            return redirect(url_for('change_password'))
+        if not new_pw or new_pw != confirm_pw:
+            flash('新密码不能为空且两次输入必须一致。')
+            return redirect(url_for('change_password'))
+        set_password(new_pw)
+        flash('密码已更新。请重新登录。')
+        return redirect(url_for('logout'))
+    return render_template('set_password.html')
+
+
+@app.route('/organizations', methods=['GET', 'POST'])
+def manage_orgs() -> Any:
+    """Display and manage organisations.
+
+    The page lists existing organisations and provides a form to add a new one.
+    """
+    if request.method == 'POST':
+        name = request.form.get('name')
+        client_id = request.form.get('client_id')
+        tenant_id = request.form.get('tenant_id')
+        client_secret = request.form.get('client_secret')
+        if not all([name, client_id, tenant_id, client_secret]):
+            flash('所有字段均为必填。')
+            return redirect(url_for('manage_orgs'))
+        org_record = {
+            'id': str(uuid.uuid4()),
+            'name': name,
+            'client_id': client_id,
+            'tenant_id': tenant_id,
+            'client_secret': client_secret
+        }
+        config.setdefault('organizations', []).append(org_record)
+        save_config(config)
+        flash('已添加组织。')
+        return redirect(url_for('manage_orgs'))
+    return render_template('organizations.html', organizations=config.get('organizations', []), active_org_id=session.get('org_id'))
+
+
+@app.route('/organizations/edit/<org_id>', methods=['GET', 'POST'])
+def edit_org(org_id: str) -> Any:
+    """Edit an existing organisation's connection details.
+
+    When the form is submitted via POST the organisation record is updated
+    in the configuration and persisted to disk.  On GET the current values
+    are displayed in a form for editing."""
+    org = get_org(org_id)
+    if not org:
+        flash('未找到该组织。')
+        return redirect(url_for('manage_orgs'))
+    if request.method == 'POST':
+        name = request.form.get('name')
+        client_id = request.form.get('client_id')
+        tenant_id = request.form.get('tenant_id')
+        client_secret = request.form.get('client_secret')
+        if not all([name, client_id, tenant_id, client_secret]):
+            flash('所有字段均为必填。')
+            return redirect(url_for('edit_org', org_id=org_id))
+        # Update the organisation fields in place
+        org['name'] = name
+        org['client_id'] = client_id
+        org['tenant_id'] = tenant_id
+        org['client_secret'] = client_secret
+        save_config(config)
+        flash('组织信息已更新。')
+        return redirect(url_for('manage_orgs'))
+    # GET request: show edit form
+    return render_template('edit_org.html', org=org)
+
+
+@app.route('/organizations/test/<org_id>')
+def test_org(org_id: str) -> Any:
+    """Test whether the configured API credentials for a single organisation are valid.
+
+    This endpoint attempts to call a lightweight Microsoft Graph API endpoint
+    (retrieving the organisation's subscribed SKUs) to verify connectivity
+    and permissions.  The result is reported via flash messages."""
+    org = get_org(org_id)
+    if not org:
+        flash('未找到该组织。')
+        return redirect(url_for('manage_orgs'))
+    # Attempt to fetch subscribed SKUs as a basic connectivity check
+    resp = graph_request(org, 'GET', '/subscribedSkus')
+    if resp is not None:
+        org_api_status[org_id] = True
+        flash(f"组织 {org['name']} API 测试成功。")
+    else:
+        org_api_status[org_id] = False
+        flash(f"组织 {org['name']} API 测试失败，请检查配置。")
+    return redirect(url_for('manage_orgs'))
+
+
+@app.route('/organizations/test_all')
+def test_all_orgs() -> Any:
+    """Test API connectivity for all configured organisations.
+
+    Each organisation is tested in turn using a lightweight Graph API
+    request.  A summary of how many tests succeeded and failed is
+    provided to the user via a single flash message."""
+    orgs = config.get('organizations', [])
+    if not orgs:
+        flash('没有已配置的组织。')
+        return redirect(url_for('manage_orgs'))
+    success = 0
+    failure = 0
+    for org in orgs:
+        resp = graph_request(org, 'GET', '/subscribedSkus')
+        if resp is not None:
+            org_api_status[org['id']] = True
+            success += 1
+        else:
+            org_api_status[org['id']] = False
+            failure += 1
+    flash(f"API 测试完成：成功 {success} 个，失败 {failure} 个。")
+    return redirect(url_for('manage_orgs'))
+
+
+@app.route('/organizations/template')
+def download_org_template() -> Any:
+    """Provide a CSV template for batch importing organisation details.
+
+    The template includes a header row with columns: name, client_id,
+    tenant_id, client_secret.  Users can download and populate this file to
+    import multiple organisations at once."""
+    from flask import Response
+    template_csv = 'name,client_id,tenant_id,client_secret\n'
+    # Create a response with the CSV content
+    response = Response(template_csv, mimetype='text/csv')
+    response.headers['Content-Disposition'] = 'attachment; filename=org_template.csv'
+    return response
+
+
+@app.route('/organizations/import', methods=['POST'])
+def import_orgs() -> Any:
+    """Import multiple organisations from an uploaded CSV file.
+
+    Each row in the uploaded file should contain four columns: name,
+    client_id, tenant_id and client_secret.  Rows with missing fields are
+    skipped and an error is recorded.  Successfully parsed organisations are
+    added to the configuration and persisted to disk."""
+    file = request.files.get('file')
+    if not file:
+        flash('未选择文件。')
+        return redirect(url_for('manage_orgs'))
+    import csv
+    import io
+    success_count = 0
+    errors: List[str] = []
+    try:
+        stream = io.StringIO(file.stream.read().decode('utf-8'))
+        reader = csv.DictReader(stream)
+        for idx, row in enumerate(reader, start=1):
+            name = row.get('name', '').strip()
+            client_id = row.get('client_id', '').strip()
+            tenant_id = row.get('tenant_id', '').strip()
+            client_secret = row.get('client_secret', '').strip()
+            if not all([name, client_id, tenant_id, client_secret]):
+                errors.append(f'第 {idx+1} 行缺少字段。')
+                continue
+            # Check for duplicate by name or client_id and skip if exists
+            duplicate = False
+            for org in config.get('organizations', []):
+                if org.get('name') == name or org.get('client_id') == client_id:
+                    duplicate = True
+                    errors.append(f'第 {idx+1} 行重复的名称或客户端 ID。')
+                    break
+            if duplicate:
+                continue
+            # Create organisation record
+            new_org = {
+                'id': str(uuid.uuid4()),
+                'name': name,
+                'client_id': client_id,
+                'tenant_id': tenant_id,
+                'client_secret': client_secret
+            }
+            config.setdefault('organizations', []).append(new_org)
+            success_count += 1
+        # Persist changes if any
+        if success_count > 0:
+            save_config(config)
+        if success_count:
+            flash(f'成功导入 {success_count} 个组织。')
+        if errors:
+            flash('导入过程中存在问题：' + '；'.join(errors))
+    except Exception as exc:
+        flash(f'导入失败：{exc}')
+    return redirect(url_for('manage_orgs'))
+
+
+@app.route('/organizations/delete/<org_id>')
+def delete_org(org_id: str) -> Any:
+    """Remove an organisation from the configuration."""
+    orgs = config.get('organizations', [])
+    updated = [o for o in orgs if o.get('id') != org_id]
+    if len(updated) != len(orgs):
+        config['organizations'] = updated
+        save_config(config)
+        # Remove token cache entry as well
+        token_cache.pop(org_id, None)
+        # Clear active organisation if it was removed
+        if session.get('org_id') == org_id:
+            session.pop('org_id', None)
+        flash('组织已删除。')
+    else:
+        flash('未找到该组织。')
+    return redirect(url_for('manage_orgs'))
+
+
+@app.route('/select_org/<org_id>')
+def select_org(org_id: str) -> Any:
+    """Select an organisation for subsequent operations."""
+    """Select an organisation for subsequent operations.
+
+    When called with a 'next' query parameter, the user will be
+    redirected to that URL after the organisation is selected.  If no
+    'next' parameter is provided, the default redirection is to the
+    user management page.  This allows callers to choose whether the
+    user should land on the organisation summary or another view.
+    """
+    if get_org(org_id):
+        session['org_id'] = org_id
+        flash('已切换到选定组织。')
+        next_url = request.args.get('next')
+        # If the next parameter is present, redirect there; otherwise to list_users
+        if next_url:
+            return redirect(next_url)
+        return redirect(url_for('list_users'))
+    flash('未找到该组织。')
+    return redirect(url_for('manage_orgs'))
+
+
+@app.route('/users')
+def list_users() -> Any:
+    """User management page.
+
+    This view serves multiple purposes depending on the state:
+
+    * When no organisation has been selected (session['org_id'] is absent),
+      the page displays a list of available organisations for selection.
+    * Once an organisation is selected and the `view` query parameter is not
+      present or equals `'summary'`, a summary of the organisation is shown,
+      including licence usage and counts of administrators.  This avoids an
+      expensive user list query on initial load.
+    * When `view=users` is specified, the user list is fetched.  An optional
+      `role` query parameter filters users by administrative role.
+    """
+    # If a reset flag is present, clear any previously selected organisation
+    if request.args.get('reset'):
+        session.pop('org_id', None)
+    # Determine if an organisation has been selected via the session
+    org_id = session.get('org_id')
+    # Determine which view to show: summary or user list
+    view_mode = request.args.get('view', 'summary')
+    role_filter = request.args.get('role', '')
+
+    if not org_id:
+        # No active organisation – show selection list
+        return render_template(
+            'users.html',
+            mode='select',
+            organizations=config.get('organizations', []),
+            role_filter='',
+            active_org_id=None
+        )
+
+    # Ensure the organisation exists
+    org = get_org(org_id)
+    if not org:
+        flash('组织配置错误。')
+        session.pop('org_id', None)
+        return redirect(url_for('list_users'))
+
+    # Show summary view by default
+    if view_mode != 'users':
+        # Before computing summary, verify the API is available.  If the test
+        # fails, record the status and display an error message instead of
+        # loading any further data.
+        api_resp = graph_request(org, 'GET', '/subscribedSkus')
+        if api_resp is None:
+            org_api_status[org_id] = False
+            return render_template(
+                'users.html',
+                mode='api_unavailable',
+                organizations=config.get('organizations', []),
+                active_org_id=org_id
+            )
+        # API is available; record status and proceed to build summary
+        org_api_status[org_id] = True
+        summary: Dict[str, Any] = {}
+        licences = []
+        if api_resp and 'value' in api_resp:
+            for sku in api_resp['value']:
+                prepaid = sku.get('prepaidUnits', {})
+                licences.append({
+                    'skuPartNumber': sku.get('skuPartNumber'),
+                    'enabled': prepaid.get('enabled'),
+                    'used': sku.get('consumedUnits')
+                })
+        summary['licences'] = licences
+        # Count Global Administrators and Privileged Role Administrators
+        global_admin_count = 0
+        privileged_admin_count = 0
+        ga_id = get_role_definition_id(org, 'Global Administrator')
+        pra_id = get_role_definition_id(org, 'Privileged Role Administrator')
+        if ga_id:
+            ga_assignments = graph_request(org, 'GET', '/roleManagement/directory/roleAssignments', params={'$filter': f"roleDefinitionId eq '{ga_id}'"})
+            global_admin_count = len(ga_assignments.get('value', [])) if ga_assignments else 0
+        if pra_id:
+            pra_assignments = graph_request(org, 'GET', '/roleManagement/directory/roleAssignments', params={'$filter': f"roleDefinitionId eq '{pra_id}'"})
+            privileged_admin_count = len(pra_assignments.get('value', [])) if pra_assignments else 0
+        summary['global_admin_count'] = global_admin_count
+        summary['privileged_admin_count'] = privileged_admin_count
+        # Attempt to retrieve total user count via the /users/$count endpoint.
+        # This requires the ConsistencyLevel header; if not supported, we
+        # fall back to None and omit the total user count from the summary.
+        total_users: Optional[int] = None
+        count_resp = graph_request(org, 'GET', '/users/$count', extra_headers={'ConsistencyLevel': 'eventual'})
+        try:
+            if count_resp is not None:
+                total_users = int(count_resp)
+        except ValueError:
+            total_users = None
+        summary['total_users'] = total_users
+        return render_template(
+            'users.html',
+            mode='summary',
+            summary=summary,
+            organizations=config.get('organizations', []),
+            active_org_id=org_id
+        )
+
+    # view_mode == 'users' – fetch user list with optional role filter
+    users: List[Dict[str, Any]] = []
+    if role_filter:
+        # Fetch the role definition ID for the given display name
+        role_id = get_role_definition_id(org, role_filter)
+        if not role_id:
+            flash(f'无法找到角色 {role_filter}。')
+            return redirect(url_for('list_users'))
+        # Retrieve all role assignments for the specified role
+        assignments = graph_request(org, 'GET', '/roleManagement/directory/roleAssignments', params={'$filter': f"roleDefinitionId eq '{role_id}'"})
+        principal_ids = [a['principalId'] for a in assignments.get('value', [])]
+        for uid in principal_ids:
+            user_data = graph_request(org, 'GET', f'/users/{uid}', params={'$select': 'id,displayName,userPrincipalName,mail'})
+            if user_data:
+                users.append(user_data)
+    else:
+        # Without a filter, fetch the first 200 users
+        response = graph_request(org, 'GET', '/users', params={'$select': 'id,displayName,userPrincipalName,mail', '$top': '200'})
+        users = response.get('value', []) if response else []
+    # Fetch admin assignments to mark global and privileged admins
+    global_admin_set: set = set()
+    privileged_admin_set: set = set()
+    ga_id = get_role_definition_id(org, 'Global Administrator')
+    pra_id = get_role_definition_id(org, 'Privileged Role Administrator')
+    if ga_id:
+        ga_assignments = graph_request(org, 'GET', '/roleManagement/directory/roleAssignments', params={'$filter': f"roleDefinitionId eq '{ga_id}'"})
+        global_admin_set = {a['principalId'] for a in ga_assignments.get('value', [])}
+    if pra_id:
+        pra_assignments = graph_request(org, 'GET', '/roleManagement/directory/roleAssignments', params={'$filter': f"roleDefinitionId eq '{pra_id}'"})
+        privileged_admin_set = {a['principalId'] for a in pra_assignments.get('value', [])}
+    # Annotate users
+    for u in users:
+        uid = u.get('id')
+        u['is_global_admin'] = uid in global_admin_set
+        u['is_privileged_admin'] = uid in privileged_admin_set
+    return render_template(
+        'users.html',
+        mode='list',
+        users=users,
+        role_filter=role_filter,
+        organizations=config.get('organizations', []),
+        active_org_id=org_id
+    )
+
+
+@app.route('/user/<user_id>')
+def user_detail(user_id: str) -> Any:
+    """Show detailed information for a single user, including roles and licences."""
+    org_id = session.get('org_id')
+    org = get_org(org_id) if org_id else None
+    if not org:
+        flash('请先选择组织。')
+        return redirect(url_for('manage_orgs'))
+
+    # Fetch user object with additional attributes.  Only select properties
+    # required for display to avoid retrieving unnecessary data.  In particular,
+    # accountEnabled, createdDateTime, and lastPasswordChangeDateTime are not
+    # returned by default and must be explicitly selected according to the
+    # Microsoft Graph documentation【787419988700041†L450-L461】.  These fields
+    # help administrators see whether the account is enabled and view basic
+    # account lifecycle information.
+    user = graph_request(
+        org,
+        'GET',
+        f'/users/{user_id}',
+        params={
+            '$select': 'id,displayName,userPrincipalName,accountEnabled,lastPasswordChangeDateTime,createdDateTime'
+        }
+    )
+    if not user:
+        flash('无法获取用户信息。')
+        return redirect(url_for('list_users'))
+
+    # Fetch role assignments for this user, expanding the roleDefinition to get the display name
+    roles_resp = graph_request(org, 'GET', '/roleManagement/directory/roleAssignments', params={'$filter': f"principalId eq '{user_id}'", '$expand': 'roleDefinition'})
+    roles: List[str] = []
+    is_global_admin = False
+    is_privileged_admin = False
+    if roles_resp and 'value' in roles_resp:
+        for assignment in roles_resp['value']:
+            role_def = assignment.get('roleDefinition', {})
+            display = role_def.get('displayName', role_def.get('id'))
+            roles.append(display)
+            if display == 'Global Administrator':
+                is_global_admin = True
+            if display == 'Privileged Role Administrator':
+                is_privileged_admin = True
+
+    # Fetch licence details for the user, but we only keep top-level fields to avoid showing service plans
+    licence_resp = graph_request(org, 'GET', f'/users/{user_id}/licenseDetails')
+    licence_details_raw = licence_resp.get('value', []) if licence_resp else []
+    # Simplify licence details: only include skuPartNumber
+    licence_details = []
+    for lic in licence_details_raw:
+        licence_details.append({'skuPartNumber': lic.get('skuPartNumber')})
+
+    # Determine current role for default selection in UI
+    if is_global_admin:
+        current_role = 'Global Administrator'
+    elif is_privileged_admin:
+        current_role = 'Privileged Role Administrator'
+    else:
+        current_role = 'normal'
+
+    return render_template(
+        'user_detail.html',
+        user=user,
+        roles=roles,
+        licence_details=licence_details,
+        current_role=current_role,
+        organizations=config.get('organizations', []),
+        active_org_id=org_id
+    )
+
+
+@app.route('/user/<user_id>/license', methods=['GET', 'POST'])
+def assign_licence(user_id: str) -> Any:
+    """Assign a new licence to the specified user.
+
+    This view lists available subscribed SKUs (licences) in the current tenant
+    and allows the administrator to add a licence.  Licence removal is not
+    implemented to keep the example concise.
+    """
+    org_id = session.get('org_id')
+    org = get_org(org_id) if org_id else None
+    if not org:
+        flash('请先选择组织。')
+        return redirect(url_for('manage_orgs'))
+    if request.method == 'POST':
+        sku_id = request.form.get('sku_id')
+        if not sku_id:
+            flash('请选择一个订阅 SKU。')
+            return redirect(url_for('assign_licence', user_id=user_id))
+        data = {
+            'addLicenses': [
+                {
+                    'skuId': sku_id,
+                    'disabledPlans': []
+                }
+            ],
+            'removeLicenses': []
+        }
+        resp = graph_request(org, 'POST', f'/users/{user_id}/assignLicense', data=data)
+        if resp is not None:
+            flash('订阅已成功分配。')
+        else:
+            flash('订阅分配失败。请检查权限和订阅配额。')
+        return redirect(url_for('user_detail', user_id=user_id))
+    # GET request: fetch available SKUs
+    skus_resp = graph_request(org, 'GET', '/subscribedSkus')
+    skus = skus_resp.get('value', []) if skus_resp else []
+    return render_template('assign_license.html', user_id=user_id, skus=skus)
+
+
+@app.route('/user/<user_id>/update', methods=['POST'])
+def update_user(user_id: str) -> Any:
+    """Update a user's password and administrative role.
+
+    The administrator may provide a new password and/or select a new role.
+    Only fields that are explicitly changed will be applied.  Role updates
+    involve adding or removing assignments for Global Administrator and
+    Privileged Role Administrator roles as appropriate.  Password updates
+    use the Graph API to update the user's passwordProfile."""
+    org_id = session.get('org_id')
+    org = get_org(org_id) if org_id else None
+    if not org:
+        flash('请先选择组织。')
+        return redirect(url_for('manage_orgs'))
+
+    # Fetch new values from form
+    new_password = request.form.get('new_password', '').strip()
+    selected_role = request.form.get('role')
+    # Account enabled flag: value will be 'true' or 'false' (or None if not provided)
+    account_enabled_str = request.form.get('account_enabled')
+
+    # Update password if provided
+    if new_password:
+        patch_data = {
+            'passwordProfile': {
+                'forceChangePasswordNextSignIn': False,
+                'password': new_password
+            }
+        }
+        resp = graph_request(org, 'PATCH', f'/users/{user_id}', data=patch_data)
+        if resp is not None:
+            flash('密码已更新。')
+        else:
+            flash('密码更新失败，请检查权限。')
+
+    # Update accountEnabled if provided
+    if account_enabled_str is not None:
+        # Convert string to boolean
+        new_status = True if account_enabled_str.lower() == 'true' else False
+        patch_data = {
+            'accountEnabled': new_status
+        }
+        resp_enabled = graph_request(org, 'PATCH', f'/users/{user_id}', data=patch_data)
+        if resp_enabled is not None:
+            flash('账户启用状态已更新。')
+        else:
+            flash('账户启用状态更新失败，请检查权限。')
+
+    # Update role if selected
+    if selected_role:
+        # Determine role definition IDs
+        ga_id = get_role_definition_id(org, 'Global Administrator')
+        pra_id = get_role_definition_id(org, 'Privileged Role Administrator')
+        # Fetch existing assignments for this user
+        assignments_resp = graph_request(org, 'GET', '/roleManagement/directory/roleAssignments', params={'$filter': f"principalId eq '{user_id}'"})
+        assignments = assignments_resp.get('value', []) if assignments_resp else []
+        # Determine if GA or PRA assignments exist
+        ga_assignment_id = None
+        pra_assignment_id = None
+        for a in assignments:
+            if ga_id and a.get('roleDefinitionId') == ga_id:
+                ga_assignment_id = a['id']
+            if pra_id and a.get('roleDefinitionId') == pra_id:
+                pra_assignment_id = a['id']
+        # Helper to assign role
+        def add_role_assignment(role_def_id: str) -> None:
+            data = {
+                'principalId': user_id,
+                'roleDefinitionId': role_def_id,
+                'directoryScopeId': '/'
+            }
+            graph_request(org, 'POST', '/roleManagement/directory/roleAssignments', data=data)
+        # Helper to remove assignment by ID
+        def remove_assignment(assignment_id: str) -> None:
+            graph_request(org, 'DELETE', f'/roleManagement/directory/roleAssignments/{assignment_id}')
+        # Process according to selected role
+        if selected_role == 'normal':
+            # Remove any admin roles
+            if ga_assignment_id:
+                remove_assignment(ga_assignment_id)
+            if pra_assignment_id:
+                remove_assignment(pra_assignment_id)
+            flash('已设置为普通用户。')
+        elif selected_role == 'Global Administrator':
+            # Ensure GA assignment exists
+            if not ga_assignment_id and ga_id:
+                add_role_assignment(ga_id)
+            # Remove PRA if exists
+            if pra_assignment_id:
+                remove_assignment(pra_assignment_id)
+            flash('已设置为全局管理员。')
+        elif selected_role == 'Privileged Role Administrator':
+            # Ensure PRA assignment exists
+            if not pra_assignment_id and pra_id:
+                add_role_assignment(pra_id)
+            # Remove GA if exists
+            if ga_assignment_id:
+                remove_assignment(ga_assignment_id)
+            flash('已设置为特权角色管理员。')
+    return redirect(url_for('user_detail', user_id=user_id))
+
+
+if __name__ == '__main__':
+    # Run the Flask development server when executed directly.  In production
+    # the Dockerfile will invoke gunicorn to serve the app.
+    app.run(host='0.0.0.0', port=5000, debug=True)
+
+# Provide helper functions to templates
+@app.context_processor
+def inject_helpers() -> Dict[str, Any]:
+    """Inject helper functions and variables into Jinja templates."""
+    return {
+        'get_org': get_org,
+        'config': config,
+        'org_api_status': org_api_status,
+        'active_org_id': session.get('org_id')
+    }
