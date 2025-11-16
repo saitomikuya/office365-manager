@@ -1,0 +1,13 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>删除用户确认</h2>
+{% if user %}
+<p>您确定要删除用户 <strong>{{ user.displayName or user.userPrincipalName }}</strong> 吗？此操作不可撤销。</p>
+{% else %}
+<p>您确定要删除此用户吗？此操作不可撤销。</p>
+{% endif %}
+<form method="post" action="{{ url_for('delete_user', user_id=user_id) }}">
+  <button type="submit" class="btn btn-danger">确认删除</button>
+  <a href="{{ url_for('user_detail', user_id=user_id) }}" class="btn btn-secondary">取消</a>
+</form>
+{% endblock %}

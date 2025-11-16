@@ -348,6 +348,35 @@ h2 {
     color: #6c757d !important;
 }
 
+/* 订阅状态颜色标识 */
+/* 活动：绿色 */
+.status-活动 {
+    background-color: #198754;
+    color: #fff;
+}
+/* 警告：黄色 */
+.status-警告 {
+    background-color: #ffc107;
+    color: #212529;
+}
+/* 已禁用 或 已删除：红色 */
+.status-已禁用,
+.status-已删除 {
+    background-color: #dc3545;
+    color: #fff;
+}
+/* 已过期或未知：灰色 */
+.status-已过期,
+.status-未知 {
+    background-color: #6c757d;
+    color: #fff;
+}
+/* 已锁定：红色 */
+.status-已锁定 {
+    background-color: #dc3545;
+    color: #fff;
+}
+
 /* 分页控件样式 */
 .pagination {
     display: flex;

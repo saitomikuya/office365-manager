@@ -1,0 +1,66 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>添加新用户</h2>
+<form method="post" action="{{ url_for('add_user') }}">
+  <div class="mb-3" style="max-width: 400px;">
+    <label for="display_name" class="form-label">显示名称</label>
+    <input type="text" class="form-control" id="display_name" name="display_name" required>
+  </div>
+  <div class="mb-3" style="max-width: 400px;">
+    <label for="local_part" class="form-label">用户名</label>
+    <input type="text" class="form-control" id="local_part" name="local_part" placeholder="用户名，不含 @" required>
+  </div>
+  <div class="mb-3" style="max-width: 400px;">
+    <label for="domain" class="form-label">选择域名</label>
+    <select id="domain" name="domain" class="form-select" required>
+      {% for dom in domains %}
+      <option value="{{ dom }}" {% if dom == default_domain %}selected{% endif %}>{{ dom }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="mb-3" style="max-width: 400px;">
+    <label for="role" class="form-label">管理员角色</label>
+    <select id="role" name="role" class="form-select">
+      <option value="normal">普通用户</option>
+      <option value="Global Administrator">全局管理员</option>
+      <option value="Privileged Role Administrator">特权角色管理员</option>
+    </select>
+  </div>
+  <h4>分配订阅</h4>
+  <table class="table table-bordered">
+    <thead>
+      <tr>
+        <th>选择</th>
+        <th>产品名称</th>
+        <th>SKU 名称</th>
+        <th>已分配/总数量</th>
+        <th>可用数量</th>
+        <th>订阅状态</th>
+        <th>续订到期日期</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for sku in skus %}
+      <tr>
+        <td>
+          <input type="checkbox" name="sku_ids" value="{{ sku.skuId }}" {% if sku.available == 0 %}disabled{% endif %}>
+        </td>
+        <td>{{ sku.productName }}</td>
+        <td>{{ sku.skuPartNumber }}</td>
+        <td>{{ sku.ratio }}</td>
+        <td>{{ sku.available }}</td>
+        <td>{{ sku.status }}</td>
+        <td>{{ sku.renewal }}</td>
+      </tr>
+      {% endfor %}
+      {% if skus|length == 0 %}
+      <tr><td colspan="7">没有可用订阅。</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+  <div class="mb-3">
+    <button type="submit" class="btn btn-primary">创建用户</button>
+    <a href="{{ url_for('list_users', view='users') }}" class="btn btn-secondary">取消</a>
+  </div>
+</form>
+{% endblock %}

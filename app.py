@@ -1,11 +1,14 @@
 import os
 import json
 import uuid
+import secrets
+import string
 import hashlib
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+import threading  # For deferred background tasks
 from flask import (Flask, render_template, request, redirect, url_for,
                    session, flash)
 from msal import ConfidentialClientApplication
@@ -106,6 +109,22 @@ def get_product_name_for_sku(sku_part_number: Optional[str]) -> str:
         return SKU_PRODUCT_NAMES[sku_part_number]
     # Fallback: replace underscores and capitalise words
     return sku_part_number.replace('_', ' ').title()
+
+# Mapping of subscription capability statuses returned by subscribedSkus
+# to more user‑friendly Chinese labels.  Microsoft Graph returns
+# values such as ``Enabled``, ``Warning``, ``Suspended``, ``Deleted``
+# and ``LockedOut`` via the ``capabilityStatus`` property.  We use
+# this dictionary to translate these values into descriptive terms in
+# the UI.  Unknown statuses are left unchanged.
+CAPABILITY_STATUS_LABELS: Dict[str, str] = {
+    'Enabled': '活动',
+    'Warning': '警告',
+    'Suspended': '已禁用',
+    'Deleted': '已删除',
+    'LockedOut': '已锁定',
+    'Expired': '已过期',
+    'Unknown': '未知'
+}
 
 
 
@@ -227,16 +246,25 @@ def graph_request(org: Dict[str, str], method: str, endpoint: str,
         if response.status_code == 401:
             token_cache.pop(org['id'], None)
             return None
-        response.raise_for_status()
-        # No content
+        # If the response indicates an error (4xx/5xx), attempt to parse the
+        # JSON error body and return it.  This allows callers to surface
+        # error messages rather than always treating errors as None.
+        if response.status_code >= 400:
+            try:
+                return response.json()
+            except Exception:
+                return None
+        # No content indicates success without body.  Return an empty dict so callers
+        # can treat None as error and truthy as success.
         if response.status_code == 204:
-            return None
+            return {}
         # The /$count endpoints return a plain integer in the body as text/plain
         if endpoint.endswith('/$count') or endpoint.endswith('$count'):
             return response.text.strip()
-        # For other endpoints return the JSON body
+        # Otherwise return parsed JSON
         return response.json()
     except requests.RequestException as exc:
+        # Log exception for debugging; return None
         print(f"Graph API error on {endpoint}: {exc}")
         return None
 
@@ -664,16 +692,48 @@ def list_users() -> Any:
         summary: Dict[str, Any] = {}
         licences: List[Dict[str, Any]] = []
         if api_resp and 'value' in api_resp:
+            # Attempt to fetch renewal and status information via the directory/subscriptions endpoint.
+            # This endpoint returns objects keyed by skuId with fields including status and nextLifecycleDateTime.
+            # Not all tenants or SKUs will have renewal information; if the call fails, we ignore it.
+            renewal_info: Dict[str, Dict[str, Any]] = {}
+            try:
+                subs_resp = graph_request(org, 'GET', '/directory/subscriptions')
+                # subs_resp may be a list of subscription objects
+                if subs_resp and 'value' in subs_resp:
+                    for sub in subs_resp['value']:
+                        sku_id = sub.get('skuId')
+                        if sku_id:
+                            renewal_info[sku_id] = {
+                                'status': sub.get('status'),
+                                'renewal_date': sub.get('nextLifecycleDateTime')
+                            }
+            except Exception:
+                # ignore errors – fallback to default status/renewal
+                pass
             for sku in api_resp['value']:
                 prepaid = sku.get('prepaidUnits', {})
                 sku_part = sku.get('skuPartNumber')
+                sku_id = sku.get('skuId')
+                enabled = prepaid.get('enabled') or 0
+                warning = prepaid.get('warning') or 0
+                suspended = prepaid.get('suspended') or 0
+                total = enabled + warning + suspended
+                used = sku.get('consumedUnits') or 0
+                available_units = total - used if total >= used else 0
+                # Translate capabilityStatus
+                capability = sku.get('capabilityStatus')
+                status_label = CAPABILITY_STATUS_LABELS.get(capability, capability or '未知')
+                # Renewal date from directory/subscriptions
+                renewal = None
+                if sku_id and sku_id in renewal_info:
+                    renewal = renewal_info[sku_id].get('renewal_date')
                 licences.append({
-                    # Friendly product name for display
                     'productName': get_product_name_for_sku(sku_part),
-                    # Original SKU identifier for reference
                     'skuPartNumber': sku_part,
-                    'enabled': prepaid.get('enabled'),
-                    'used': sku.get('consumedUnits')
+                    'ratio': f"{used}/{total}" if total > 0 else f"{used}/{used}",
+                    'available': available_units,
+                    'status': status_label,
+                    'renewal': renewal or '未知'
                 })
         summary['licences'] = licences
         # Count Global and Privileged administrators
@@ -707,6 +767,9 @@ def list_users() -> Any:
         )
 
     # view_mode == 'users' – build user list with pagination and search
+    # If a refresh flag is present, clear the paging cache so the list will be re-fetched
+    if request.args.get('refresh'):
+        user_paging_cache.clear()
     # Parse paging and search parameters
     try:
         page = int(request.args.get('page', '1'))
@@ -932,7 +995,11 @@ def user_detail(user_id: str) -> Any:
     # Simplify licence details: only include skuPartNumber
     licence_details = []
     for lic in licence_details_raw:
-        licence_details.append({'skuPartNumber': lic.get('skuPartNumber')})
+        part = lic.get('skuPartNumber')
+        licence_details.append({
+            'skuPartNumber': part,
+            'productName': get_product_name_for_sku(part)
+        })
 
     # Determine current role for default selection in UI
     if is_global_admin:
@@ -955,41 +1022,115 @@ def user_detail(user_id: str) -> Any:
 
 @app.route('/user/<user_id>/license', methods=['GET', 'POST'])
 def assign_licence(user_id: str) -> Any:
-    """Assign a new licence to the specified user.
+    """Assign licences to the specified user.
 
     This view lists available subscribed SKUs (licences) in the current tenant
-    and allows the administrator to add a licence.  Licence removal is not
-    implemented to keep the example concise.
+    and allows the administrator to add one or more licences.  Existing
+    assignments are preselected in the UI.  Removal of licences is not
+    supported at this time.
     """
     org_id = session.get('org_id')
     org = get_org(org_id) if org_id else None
     if not org:
         flash('请先选择组织。')
         return redirect(url_for('manage_orgs'))
+    # Handle licence assignment submission
     if request.method == 'POST':
-        sku_id = request.form.get('sku_id')
-        if not sku_id:
-            flash('请选择一个订阅 SKU。')
-            return redirect(url_for('assign_licence', user_id=user_id))
-        data = {
-            'addLicenses': [
-                {
-                    'skuId': sku_id,
-                    'disabledPlans': []
-                }
-            ],
-            'removeLicenses': []
+        # Retrieve selected SKU IDs from the form (multiple selection)
+        selected_sku_ids = request.form.getlist('sku_ids')
+        # Fetch currently assigned licences to compare additions and removals
+        current_lic_resp = graph_request(org, 'GET', f'/users/{user_id}/licenseDetails')
+        current_sku_ids: set = set()
+        if current_lic_resp and 'value' in current_lic_resp:
+            for lic in current_lic_resp['value']:
+                sid = lic.get('skuId')
+                if sid:
+                    current_sku_ids.add(sid)
+        # Determine which SKUs to add and which to remove
+        selected_set = set(selected_sku_ids)
+        add_list: List[Dict[str, Any]] = []
+        remove_list: List[str] = []
+        # Add licences not currently assigned
+        for sid in selected_set:
+            if sid not in current_sku_ids:
+                add_list.append({'skuId': sid, 'disabledPlans': []})
+        # Remove licences that were assigned but are now unchecked
+        for sid in current_sku_ids:
+            if sid not in selected_set:
+                remove_list.append(sid)
+        # If neither adding nor removing, nothing to do
+        if not add_list and not remove_list:
+            flash('未检测到订阅变更。')
+            return redirect(url_for('user_detail', user_id=user_id))
+        payload = {
+            'addLicenses': add_list,
+            'removeLicenses': remove_list
         }
-        resp = graph_request(org, 'POST', f'/users/{user_id}/assignLicense', data=data)
-        if resp is not None:
-            flash('订阅已成功分配。')
+        resp = graph_request(org, 'POST', f'/users/{user_id}/assignLicense', data=payload)
+        # Determine if the response indicates an error
+        error_msg = ''
+        if resp is None:
+            error_msg = '令牌无效或权限不足'
+        elif isinstance(resp, dict) and resp.get('error'):
+            err = resp.get('error') or {}
+            error_msg = err.get('message', '')
+        if error_msg:
+            flash('订阅更新失败：' + error_msg)
         else:
-            flash('订阅分配失败。请检查权限和订阅配额。')
+            flash('订阅已成功更新。')
         return redirect(url_for('user_detail', user_id=user_id))
-    # GET request: fetch available SKUs
+    # GET request: fetch available SKUs and current assignments
     skus_resp = graph_request(org, 'GET', '/subscribedSkus')
-    skus = skus_resp.get('value', []) if skus_resp else []
-    return render_template('assign_license.html', user_id=user_id, skus=skus)
+    all_skus = skus_resp.get('value', []) if skus_resp else []
+    current_lic_resp = graph_request(org, 'GET', f'/users/{user_id}/licenseDetails')
+    assigned_ids: set = set()
+    if current_lic_resp and 'value' in current_lic_resp:
+        for lic in current_lic_resp['value']:
+            sid = lic.get('skuId')
+            if sid:
+                assigned_ids.add(sid)
+    # Attempt to fetch renewal information for subscription statuses
+    renewal_info: Dict[str, Dict[str, Any]] = {}
+    try:
+        subs_resp = graph_request(org, 'GET', '/directory/subscriptions')
+        if subs_resp and 'value' in subs_resp:
+            for sub in subs_resp['value']:
+                sku_id = sub.get('skuId')
+                if sku_id:
+                    renewal_info[sku_id] = {
+                        'status': sub.get('status'),
+                        'renewal_date': sub.get('nextLifecycleDateTime')
+                    }
+    except Exception:
+        pass
+    # Build enriched list for the template
+    enriched_skus: List[Dict[str, Any]] = []
+    for sku in all_skus:
+        sku_id = sku.get('skuId')
+        sku_part = sku.get('skuPartNumber')
+        prepaid = sku.get('prepaidUnits', {})
+        enabled = prepaid.get('enabled') or 0
+        warning = prepaid.get('warning') or 0
+        suspended = prepaid.get('suspended') or 0
+        total = enabled + warning + suspended
+        used = sku.get('consumedUnits') or 0
+        available_units = total - used if total >= used else 0
+        capability = sku.get('capabilityStatus')
+        status_label = CAPABILITY_STATUS_LABELS.get(capability, capability or '未知')
+        renewal_date = '未知'
+        if sku_id and sku_id in renewal_info:
+            renewal_date = renewal_info[sku_id].get('renewal_date') or '未知'
+        enriched_skus.append({
+            'skuId': sku_id,
+            'skuPartNumber': sku_part,
+            'productName': get_product_name_for_sku(sku_part),
+            'ratio': f"{used}/{total}" if total > 0 else f"{used}/{used}",
+            'available': available_units,
+            'status': status_label,
+            'renewal': renewal_date,
+            'assigned': sku_id in assigned_ids
+        })
+    return render_template('assign_license.html', user_id=user_id, skus=enriched_skus)
 
 
 @app.route('/user/<user_id>/update', methods=['POST'])
@@ -1013,32 +1154,48 @@ def update_user(user_id: str) -> Any:
     # Account enabled flag: value will be 'true' or 'false' (or None if not provided)
     account_enabled_str = request.form.get('account_enabled')
 
-    # Update password if provided
+    # Build a single patch payload combining password and accountEnabled updates.
+    # According to the Microsoft Graph documentation, multiple properties can be
+    # updated in a single PATCH request【139664042075369†L690-L723】.  Combining
+    # updates reduces the number of requests and helps avoid partial failures.
+    patch_payload: Dict[str, Any] = {}
+    # Include password profile if a new password has been provided
     if new_password:
-        patch_data = {
-            'passwordProfile': {
-                'forceChangePasswordNextSignIn': False,
-                'password': new_password
-            }
+        patch_payload['passwordProfile'] = {
+            'forceChangePasswordNextSignIn': False,
+            'password': new_password
         }
-        resp = graph_request(org, 'PATCH', f'/users/{user_id}', data=patch_data)
-        if resp is not None:
-            flash('密码已更新。')
-        else:
-            flash('密码更新失败，请检查权限。')
-
-    # Update accountEnabled if provided
+    # Include accountEnabled property if the form included it
     if account_enabled_str is not None:
-        # Convert string to boolean
-        new_status = True if account_enabled_str.lower() == 'true' else False
-        patch_data = {
-            'accountEnabled': new_status
-        }
-        resp_enabled = graph_request(org, 'PATCH', f'/users/{user_id}', data=patch_data)
-        if resp_enabled is not None:
-            flash('账户启用状态已更新。')
+        new_status = account_enabled_str.lower() == 'true'
+        patch_payload['accountEnabled'] = new_status
+    # If there is any property to update, send the PATCH request
+    if patch_payload:
+        update_resp = graph_request(org, 'PATCH', f'/users/{user_id}', data=patch_payload)
+        # Determine if the response indicates an error.  graph_request returns
+        # error details as a dictionary containing an 'error' field when the
+        # status code is 4xx/5xx.  A None response indicates an authentication
+        # failure.  An empty dict indicates success (204 No Content).
+        error_msg = ''
+        if update_resp is None:
+            error_msg = '令牌无效或权限不足'
+        elif isinstance(update_resp, dict) and update_resp.get('error'):
+            err = update_resp.get('error') or {}
+            error_msg = err.get('message', '')
+        if error_msg:
+            # One or more updates failed; display Graph error message
+            msgs: List[str] = []
+            if 'passwordProfile' in patch_payload:
+                msgs.append('密码更新')
+            if 'accountEnabled' in patch_payload:
+                msgs.append('账户启用状态更新')
+            flash('、'.join(msgs) + '失败：' + error_msg)
         else:
-            flash('账户启用状态更新失败，请检查权限。')
+            # At least one update succeeded.  Provide separate success messages
+            if 'passwordProfile' in patch_payload:
+                flash('密码已更新。')
+            if 'accountEnabled' in patch_payload:
+                flash('账户启用状态已更新。')
 
     # Update role if selected
     if selected_role:
@@ -1092,6 +1249,308 @@ def update_user(user_id: str) -> Any:
                 remove_assignment(ga_assignment_id)
             flash('已设置为特权角色管理员。')
     return redirect(url_for('user_detail', user_id=user_id))
+
+# ---------------------------------------------------------------------------
+# User deletion
+
+@app.route('/user/<user_id>/delete', methods=['GET', 'POST'])
+def delete_user(user_id: str) -> Any:
+    """Delete a user from the currently selected organisation.
+
+    GET requests render a confirmation page to avoid accidental deletion.
+    POST requests perform the deletion via the Graph API.  This operation is
+    irreversible.  Appropriate permissions (e.g., User.ReadWrite.All or
+    Directory.ReadWrite.All) are required.  When using the web UI, a
+    secondary confirmation is shown before proceeding.
+    """
+    org_id = session.get('org_id')
+    org = get_org(org_id) if org_id else None
+    if not org:
+        flash('请先选择组织。')
+        return redirect(url_for('manage_orgs'))
+    # If GET, show confirmation page with user info
+    if request.method == 'GET':
+        # Fetch user to display their name; ignore if fails
+        user = graph_request(org, 'GET', f'/users/{user_id}', params={'$select': 'displayName,userPrincipalName'})
+        return render_template('delete_user.html', user=user, user_id=user_id)
+    # POST: perform deletion
+    # Send DELETE to /users/{id}
+    # Before deleting the user, remove any administrative role assignments.  Some tenants
+    # may forbid deletion of users who hold roles such as Global Administrator or
+    # Privileged Role Administrator.  Fetch assignments and remove them one by one.
+    try:
+        assignments_resp = graph_request(org, 'GET', '/roleManagement/directory/roleAssignments', params={'$filter': f"principalId eq '{user_id}'"})
+        if assignments_resp and 'value' in assignments_resp:
+            for assignment in assignments_resp['value']:
+                assn_id = assignment.get('id')
+                if assn_id:
+                    graph_request(org, 'DELETE', f"/roleManagement/directory/roleAssignments/{assn_id}")
+    except Exception:
+        # Ignore errors when removing role assignments; deletion may still succeed
+        pass
+    # Attempt to delete the user
+    resp = graph_request(org, 'DELETE', f'/users/{user_id}')
+    # If the response indicates an error: None or a dict containing an 'error'.
+    # An empty dict ({}), returned for 204 No Content, signifies success.
+    if resp is None or (isinstance(resp, dict) and resp.get('error')):
+        error_msg = ''
+        if isinstance(resp, dict):
+            err = resp.get('error') or {}
+            error_msg = err.get('message', '')
+        # If the deletion failed due to insufficient privileges, attempt to remove
+        # any remaining role assignments and retry deletion once more.  If it
+        # still fails, display the error with a suggestion for manual intervention.
+        insufficient = False
+        if error_msg and 'insufficient privileges' in error_msg.lower():
+            insufficient = True
+        if insufficient:
+            # Remove roles and schedule deletion attempts in the background.  A separate
+            # thread will attempt to delete the user multiple times until it succeeds.
+            def delete_user_later(org_copy: Dict[str, str], uid: str) -> None:
+                for _ in range(5):
+                    # Remove all role assignments
+                    try:
+                        assignments_resp2 = graph_request(org_copy, 'GET', '/roleManagement/directory/roleAssignments', params={'$filter': f"principalId eq '{uid}'"})
+                        if assignments_resp2 and 'value' in assignments_resp2:
+                            for assignment in assignments_resp2['value']:
+                                assn_id2 = assignment.get('id')
+                                if assn_id2:
+                                    graph_request(org_copy, 'DELETE', f"/roleManagement/directory/roleAssignments/{assn_id2}")
+                    except Exception:
+                        pass
+                    # Attempt deletion
+                    resp_retry = graph_request(org_copy, 'DELETE', f'/users/{uid}')
+                    # Success if resp_retry is not None and does not contain error
+                    if resp_retry is not None and not (isinstance(resp_retry, dict) and resp_retry.get('error')):
+                        # Clear cache to reflect deletion
+                        user_paging_cache.clear()
+                        print(f"[Deferred deletion] User {uid} deleted successfully")
+                        return
+                    # Wait before next attempt
+                    time.sleep(5)
+                    # Continue loop if not succeeded
+                # After attempts, log failure
+                print(f"[Deferred deletion] Failed to delete user {uid} after retries")
+            org_copy = dict(org)
+            threading.Thread(target=delete_user_later, args=(org_copy, user_id), daemon=True).start()
+            flash('删除任务已提交，后台将尝试删除该用户，请稍后刷新列表查看。')
+            return redirect(url_for('list_users', view='users'))
+        # Final failure message
+        flash('删除用户失败：' + (error_msg if error_msg else '请检查权限或用户状态。'))
+        return redirect(url_for('user_detail', user_id=user_id))
+    # Deletion succeeded.  Clear the user list cache so it refreshes.
+    user_paging_cache.clear()
+    flash('用户已删除。')
+    return redirect(url_for('list_users', view='users'))
+
+# ---------------------------------------------------------------------------
+# User creation
+
+@app.route('/users/add', methods=['GET', 'POST'])
+def add_user() -> Any:
+    """Create a new user in the currently selected organisation.
+
+    On GET, this view displays a form allowing entry of a display name,
+    user principal name, selection of licences to assign and the desired
+    administrative role.  On POST, it creates the user with a random
+    initial password, assigns the chosen licences and role, and then
+    displays the credentials for copying.  If any step fails, an error
+    message is flashed and the form is redisplayed.
+    """
+    org_id = session.get('org_id')
+    org = get_org(org_id) if org_id else None
+    if not org:
+        flash('请先选择组织。')
+        return redirect(url_for('manage_orgs'))
+
+    if request.method == 'POST':
+        display_name = request.form.get('display_name', '').strip()
+        local_part = request.form.get('local_part', '').strip()
+        domain = request.form.get('domain')
+        selected_sku_ids = request.form.getlist('sku_ids')
+        role = request.form.get('role', 'normal')
+        # Basic validation
+        if not display_name or not local_part:
+            flash('显示名称和用户名为必填。')
+            return redirect(url_for('add_user'))
+        if not domain:
+            flash('请选择域名。')
+            return redirect(url_for('add_user'))
+        # Construct UPN from local part and domain
+        upn = f"{local_part}@{domain}"
+        # Generate a secure temporary password that meets complexity requirements.
+        # Microsoft Graph enforces password complexity rules (uppercase, lowercase,
+        # digit and special character).  Use secrets.choice to build a 12‑character
+        # password containing at least one of each category.
+        alphabet = string.ascii_lowercase + string.ascii_uppercase + string.digits + '!@#$%^&*()'
+        # Ensure at least one character from each class
+        temp_password = [
+            secrets.choice(string.ascii_lowercase),
+            secrets.choice(string.ascii_uppercase),
+            secrets.choice(string.digits),
+            secrets.choice('!@#$%^&*()')
+        ]
+        # Fill the remaining characters randomly
+        temp_password += [secrets.choice(alphabet) for _ in range(8)]
+        # Shuffle to avoid predictable positions
+        secrets.SystemRandom().shuffle(temp_password)
+        temp_password = ''.join(temp_password)
+        # mailNickname uses local part
+        mail_nickname = local_part
+        # Determine usage location for licence assignment.  If the tenant's
+        # organisation record specifies a country code, use it; otherwise
+        # default to 'US'.  Some licence assignments require a usage location.
+        usage_location = 'US'
+        try:
+            org_info = graph_request(org, 'GET', '/organization')
+            if org_info and 'value' in org_info and len(org_info['value']) > 0:
+                country_code = org_info['value'][0].get('countryLetterCode')
+                if country_code:
+                    usage_location = country_code
+        except Exception:
+            pass
+        # Build user creation payload.  Include userType and usageLocation to
+        # improve compatibility.  Force password change on next sign-in.
+        user_payload = {
+            'accountEnabled': True,
+            'userType': 'Member',
+            'displayName': display_name,
+            'mailNickname': mail_nickname,
+            'userPrincipalName': upn,
+            'usageLocation': usage_location,
+            'passwordProfile': {
+                'forceChangePasswordNextSignIn': True,
+                'password': temp_password
+            }
+        }
+        # Create user
+        create_resp = graph_request(org, 'POST', '/users', data=user_payload)
+        if not create_resp or not isinstance(create_resp, dict) or not create_resp.get('id'):
+            # Attempt to surface Graph API error details if available
+            error_msg = ''
+            if isinstance(create_resp, dict):
+                # Graph errors are returned in an 'error' object with a 'message'
+                err = create_resp.get('error') or {}
+                error_msg = err.get('message', '')
+            flash('创建用户失败，请检查输入或权限。' + (f" 错误详情：{error_msg}" if error_msg else ''))
+            return redirect(url_for('add_user'))
+        new_user_id = create_resp['id']
+        # Assign licences if any selected
+        if selected_sku_ids:
+            add_list = [{'skuId': sid, 'disabledPlans': []} for sid in selected_sku_ids]
+            assign_payload = {
+                'addLicenses': add_list,
+                'removeLicenses': []
+            }
+            lic_resp = graph_request(org, 'POST', f'/users/{new_user_id}/assignLicense', data=assign_payload)
+            if lic_resp is None:
+                flash('分配订阅时出现问题，请稍后检查。')
+        # Assign administrative role asynchronously if necessary.  To avoid
+        # failures caused by eventual consistency delays, schedule the role
+        # assignment in a background thread a few seconds after user creation.
+        if role and role != 'normal':
+            def assign_role_later(org_copy: Dict[str, str], uid: str, selected_role: str) -> None:
+                # Attempt to assign the selected role multiple times.  Wait a few seconds
+                # between attempts to allow the new user to propagate.
+                for _ in range(5):
+                    time.sleep(5)
+                    ga = get_role_definition_id(org_copy, 'Global Administrator')
+                    pra = get_role_definition_id(org_copy, 'Privileged Role Administrator')
+                    role_id = None
+                    if selected_role == 'Global Administrator':
+                        role_id = ga
+                    elif selected_role == 'Privileged Role Administrator':
+                        role_id = pra
+                    if role_id:
+                        data = {
+                            'principalId': uid,
+                            'roleDefinitionId': role_id,
+                            'directoryScopeId': '/'
+                        }
+                        resp = graph_request(org_copy, 'POST', '/roleManagement/directory/roleAssignments', data=data)
+                        if resp is not None and not (isinstance(resp, dict) and resp.get('error')):
+                            # Success
+                            print(f"[Deferred role assignment] Role assigned to user {uid} successfully")
+                            return
+                        # Log failure and retry
+                        err_msg = ''
+                        if isinstance(resp, dict):
+                            err = resp.get('error') or {}
+                            err_msg = err.get('message', '')
+                        print(f"[Deferred role assignment] Attempt failed for user {uid}: {err_msg}")
+                    # continue loop until success
+                print(f"[Deferred role assignment] Gave up assigning role to user {uid}")
+            org_copy = dict(org)
+            threading.Thread(target=assign_role_later, args=(org_copy, new_user_id, role), daemon=True).start()
+            flash(f'用户已创建。用户名：{upn} 临时密码：{temp_password}（角色分配正在后台处理，请稍后查看）')
+            return redirect(url_for('user_detail', user_id=new_user_id))
+        # If no special role, simply provide credentials and redirect to user detail
+        flash(f'用户已创建。用户名：{upn} 临时密码：{temp_password}')
+        return redirect(url_for('user_detail', user_id=new_user_id))
+
+    # GET request: display form
+    # Fetch available SKUs with details for selection
+    skus_resp = graph_request(org, 'GET', '/subscribedSkus')
+    all_skus = skus_resp.get('value', []) if skus_resp else []
+    # Attempt to fetch renewal/status info for subscriptions
+    renewal_info: Dict[str, Dict[str, Any]] = {}
+    try:
+        subs_resp = graph_request(org, 'GET', '/directory/subscriptions')
+        if subs_resp and 'value' in subs_resp:
+            for sub in subs_resp['value']:
+                sid = sub.get('skuId')
+                if sid:
+                    renewal_info[sid] = {
+                        'status': sub.get('status'),
+                        'renewal_date': sub.get('nextLifecycleDateTime')
+                    }
+    except Exception:
+        pass
+    enriched_skus: List[Dict[str, Any]] = []
+    for sku in all_skus:
+        sku_id = sku.get('skuId')
+        sku_part = sku.get('skuPartNumber')
+        prepaid = sku.get('prepaidUnits', {})
+        enabled = prepaid.get('enabled') or 0
+        warning = prepaid.get('warning') or 0
+        suspended = prepaid.get('suspended') or 0
+        total = enabled + warning + suspended
+        used = sku.get('consumedUnits') or 0
+        available_units = total - used if total >= used else 0
+        capability = sku.get('capabilityStatus')
+        status_label = CAPABILITY_STATUS_LABELS.get(capability, capability or '未知')
+        renewal_date = '未知'
+        if sku_id and sku_id in renewal_info:
+            renewal_date = renewal_info[sku_id].get('renewal_date') or '未知'
+        enriched_skus.append({
+            'skuId': sku_id,
+            'skuPartNumber': sku_part,
+            'productName': get_product_name_for_sku(sku_part),
+            'ratio': f"{used}/{total}" if total > 0 else f"{used}/{used}",
+            'available': available_units,
+            'status': status_label,
+            'renewal': renewal_date
+        })
+    # Fetch available domains for user creation
+    domains_resp = graph_request(org, 'GET', '/domains')
+    domain_options: List[str] = []
+    default_domain = None
+    if domains_resp and 'value' in domains_resp:
+        for d in domains_resp['value']:
+            # Only include verified or root domains
+            name = d.get('id')
+            if not name:
+                continue
+            # Exclude special domains like *.onmicrosoft.com when other domains exist
+            domain_options.append(name)
+        # Choose default domain: prefer non‑onmicrosoft.com; otherwise first
+        for name in domain_options:
+            if not name.endswith('.onmicrosoft.com'):
+                default_domain = name
+                break
+        if not default_domain and domain_options:
+            default_domain = domain_options[0]
+    return render_template('add_user.html', skus=enriched_skus, domains=domain_options, default_domain=default_domain)
 
 
 if __name__ == '__main__':

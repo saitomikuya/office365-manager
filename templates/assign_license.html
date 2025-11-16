@@ -1,17 +1,41 @@
 {% extends 'base.html' %}
 {% block content %}
 <h2>分配订阅</h2>
-<form method="post" action="{{ url_for('assign_licence', user_id=user_id) }}" style="max-width: 400px;">
-    <div class="mb-3">
-        <label for="sku_id" class="form-label">选择订阅 SKU</label>
-        <select id="sku_id" name="sku_id" class="form-select" required>
-            <option value="" selected disabled>请选择...</option>
+<form method="post" action="{{ url_for('assign_licence', user_id=user_id) }}">
+    <table class="table table-bordered">
+        <thead>
+            <tr>
+                <th>选择</th>
+                <th>产品名称</th>
+                <th>SKU 名称</th>
+                <th>已分配/总数量</th>
+                <th>可用数量</th>
+                <th>订阅状态</th>
+                <th>续订到期日期</th>
+            </tr>
+        </thead>
+        <tbody>
             {% for sku in skus %}
-            <option value="{{ sku.skuId }}">{{ sku.skuPartNumber }} - {{ sku.prepaidUnits.enabled }} 可用</option>
+            <tr>
+                <td>
+                    <input type="checkbox" name="sku_ids" value="{{ sku.skuId }}" {% if sku.assigned %}checked{% endif %} {% if not sku.assigned and sku.available == 0 %}disabled{% endif %}>
+                </td>
+                <td>{{ sku.productName }}</td>
+                <td>{{ sku.skuPartNumber }}</td>
+                <td>{{ sku.ratio }}</td>
+                <td>{{ sku.available }}</td>
+                <td><span class="badge status-{{ sku.status }}">{{ sku.status }}</span></td>
+                <td>{{ sku.renewal }}</td>
+            </tr>
             {% endfor %}
-        </select>
+            {% if skus|length == 0 %}
+            <tr><td colspan="7">没有可用订阅。</td></tr>
+            {% endif %}
+        </tbody>
+    </table>
+    <div class="mb-3">
+        <button type="submit" class="btn btn-primary">分配所选订阅</button>
+        <a href="{{ url_for('user_detail', user_id=user_id) }}" class="btn btn-secondary">取消</a>
     </div>
-    <button type="submit" class="btn btn-primary">分配</button>
-    <a href="{{ url_for('user_detail', user_id=user_id) }}" class="btn btn-secondary">取消</a>
 </form>
 {% endblock %}

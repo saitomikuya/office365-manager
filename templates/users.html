@@ -115,8 +115,10 @@
       <tr>
         <th>产品名称</th>
         <th>SKU 名称</th>
-        <th>已启用数量</th>
-        <th>已使用数量</th>
+        <th>已分配/总数量</th>
+        <th>可用数量</th>
+        <th>订阅状态</th>
+        <th>续订到期日期</th>
       </tr>
     </thead>
     <tbody>
@@ -124,11 +126,13 @@
         <tr>
           <td>{{ lic.productName }}</td>
           <td>{{ lic.skuPartNumber }}</td>
-          <td>{{ lic.enabled }}</td>
-          <td>{{ lic.used }}</td>
+          <td>{{ lic.ratio }}</td>
+          <td>{{ lic.available }}</td>
+          <td><span class="badge status-{{ lic.status }}">{{ lic.status }}</span></td>
+          <td>{{ lic.renewal }}</td>
         </tr>
       {% else %}
-        <tr><td colspan="4">无订阅信息。</td></tr>
+        <tr><td colspan="6">无订阅信息。</td></tr>
       {% endfor %}
     </tbody>
   </table>
@@ -140,6 +144,7 @@
   <h2>用户列表 - {{ get_org(active_org_id).name }}</h2>
   {# Search and filter form #}
   <div class="mb-3">
+    {# Search and filter form plus Add user button in one row #}
     <form class="row row-cols-lg-auto g-3 align-items-center" method="get" action="{{ url_for('list_users') }}">
       <input type="hidden" name="view" value="users">
       <input type="hidden" name="page" value="1">
@@ -163,10 +168,10 @@
           <option value="200" {% if page_size == 200 %}selected{% endif %}>200</option>
         </select>
       </div>
-      <div class="col-12">
-        <button type="submit" class="btn btn-primary">应用</button>
-      </div>
-      <div class="col-12">
+      <div class="col-12 d-flex align-items-end">
+        <button type="submit" class="btn btn-primary me-2">应用</button>
+        <a href="{{ url_for('add_user') }}" class="btn btn-success me-2">添加用户</a>
+        <a href="{{ url_for('list_users', view='users', refresh='1') }}" class="btn btn-warning me-2">刷新列表</a>
         <a href="{{ url_for('list_users') }}" class="btn btn-secondary">返回概况</a>
       </div>
     </form>

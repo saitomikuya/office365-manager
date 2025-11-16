@@ -22,7 +22,7 @@
 <h4>订阅/许可证</h4>
 <p>
     {% for lic in licence_details %}
-        <span class="badge bg-secondary">{{ lic.skuPartNumber }}</span>
+        <span class="badge bg-secondary">{{ lic.productName }} ({{ lic.skuPartNumber }})</span>
     {% else %}
         <span class="text-muted">无订阅信息</span>
     {% endfor %}
@@ -52,5 +52,6 @@
     <button type="submit" class="btn btn-primary">保存修改</button>
     <a href="{{ url_for('assign_licence', user_id=user.id) }}" class="btn btn-success">分配订阅</a>
     <a href="{{ url_for('list_users', view='users') }}" class="btn btn-secondary">返回列表</a>
+    <a href="{{ url_for('delete_user', user_id=user.id) }}" class="btn btn-danger">删除用户</a>
 </form>
 {% endblock %}
