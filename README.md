@@ -10,7 +10,7 @@
 docker run -d -p 5000:5000 --name office365-manager saitomikuya/office365-manager:latest
 ```
 
-运行后，访问 `http://<服务器IP>:5000` 即可进入系统。首次登录用户名默认为 `admin`，密码也为 `admin`，请在登录后立即通过“修改密码”功能更新密码以保障安全。
+运行后，访问 `http://<服务器IP>:5000` 即可进入系统。首次登录密码默认为 `admin`，请在登录后立即通过“修改密码”功能更新密码以保障安全。
 
 ## 🛠 项目特点
 
